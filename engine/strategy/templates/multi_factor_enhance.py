@@ -17,6 +17,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from engine.errors import StrategyError
+from engine.portfolio.allocator import realized_volatility
+from engine.portfolio.builder import PortfolioBuilder, PortfolioDecision
+from engine.portfolio.constraints import PortfolioConstraints
 from engine.strategy.base import BaseStrategy
 from engine.types import Direction, Signal
 
@@ -35,12 +38,20 @@ class MultiFactorEnhanceStrategy(BaseStrategy):
                 "total_weight": 0.95,
                 "min_score": None,
                 "require_all_factors": True,
+                # ---- 组合层（默认全部关闭，保持"等权满仓"的朴素行为）----
+                "weight_scheme": "equal",
+                "max_weight": None,
+                "min_weight": 0.0,
+                "no_trade_band": 0.0,
+                "max_turnover": None,
+                "volatility_window": 20,
                 **(params or {}),
             },
         )
         self._day_counter = 0
-        #: 最近一次调仓的得分（供测试与排查使用）
+        #: 最近一次调仓的得分与组合决策（供测试与排查使用）
         self.last_scores: dict[str, float] = {}
+        self.last_decision: PortfolioDecision | None = None
 
     # -------------------------------------------------- 协议方法
     def on_bar(self, context: Any, bars: Any) -> list[Signal]:
@@ -67,26 +78,25 @@ class MultiFactorEnhanceStrategy(BaseStrategy):
             scores = {code: value for code, value in scores.items() if value >= threshold}
         self.last_scores = dict(scores)
 
-        selected = [
-            code for code, _ in sorted(scores.items(), key=lambda item: item[1], reverse=True)[:top_k]
-        ]
-        selected_set = set(selected)
+        # 组合层：选股 → 分配方案 → 上下限/碎仓/无交易带/换手上限
+        decision = self._build_weights(context, bars, scores, total_weight=total_weight)
+        self.last_decision = decision
 
         signals: list[Signal] = []
-        per_weight = total_weight / len(selected) if selected else 0.0
-        for code in selected:
+        for code, weight in sorted(decision.weights.items(), key=lambda item: item[1], reverse=True):
             signals.append(
                 Signal(
                     code=code,
                     strategy_id=context.strategy_id,
                     trade_date=context.trade_date,
                     direction=Direction.BUY,
-                    target_weight=per_weight,
-                    reason=f"多因子得分前 {top_k}（等权 {per_weight:.2%}）",
+                    target_weight=weight,
+                    reason=f"多因子得分前 {top_k}（{decision.scheme} 权重 {weight:.2%}）",
                 )
             )
+        # 持仓中不在目标权重里的（跌出名单或被约束剔除）一律清仓
         for code in sorted(context.positions()):
-            if code not in selected_set:
+            if code not in decision.weights:
                 signals.append(
                     Signal(
                         code=code,
@@ -123,6 +133,65 @@ class MultiFactorEnhanceStrategy(BaseStrategy):
         if all(value == 0.0 for value in weights.values()):
             raise StrategyError("weights 配置了但全部为 0", detail={"factors": list(factors)})
         return weights
+
+    def _build_weights(
+        self,
+        context: Any,
+        bars: Mapping[str, Any],
+        scores: Mapping[str, float],
+        *,
+        total_weight: float,
+    ) -> PortfolioDecision:
+        """把得分交给组合层，得到带约束的目标权重。"""
+        account = context.account()
+        total_asset = float(account.total_asset)
+        current_weights = self._current_weights(context, bars, total_asset)
+
+        builder = PortfolioBuilder(
+            scheme=str(self.param_or("weight_scheme", "equal")),
+            top_k=int(self.param("top_k")),
+            constraints=PortfolioConstraints(
+                max_weight=self.param_or("max_weight", None),
+                min_weight=float(self.param_or("min_weight", 0.0)),
+                cash_buffer=max(1.0 - total_weight, 0.0),
+                max_turnover=self.param_or("max_turnover", None),
+                no_trade_band=float(self.param_or("no_trade_band", 0.0)),
+            ),
+        )
+        volatilities = (
+            self._volatilities(context, bars) if builder.scheme == "inverse_vol" else None
+        )
+        return builder.build(scores, current_weights=current_weights, volatilities=volatilities)
+
+    def _current_weights(
+        self, context: Any, bars: Mapping[str, Any], total_asset: float
+    ) -> dict[str, float]:
+        """当前持仓权重（按最新价盯市）。无价可依的持仓不参与，避免用臆测价格算权重。"""
+        if total_asset <= 0:
+            return {}
+        weights: dict[str, float] = {}
+        for code, position in context.positions().items():
+            # 优先用当日收盘价（策略在收盘时点决策）；停牌等无当日 bar 时退回持仓最新价。
+            # 注意不能用 position.last_price 代替当日价：它是**昨日**盯市的结果，
+            # 会引入一天的滞后。
+            bar = bars.get(code)
+            price = float(bar.close) if bar is not None else float(getattr(position, "last_price", 0.0) or 0.0)
+            if price <= 0.0:
+                continue
+            weights[code] = float(position.qty) * price / total_asset
+        return weights
+
+    def _volatilities(self, context: Any, bars: Mapping[str, Any]) -> dict[str, float]:
+        """各标的的已实现波动率（逆波动率加权用）。"""
+        window = int(self.param_or("volatility_window", 20))
+        volatilities: dict[str, float] = {}
+        for code in sorted(bars):
+            closes = [float(value) for value in context.history(code, field="close", window=window + 1)]
+            if len(closes) < 3:
+                continue
+            returns = [closes[index] / closes[index - 1] - 1 for index in range(1, len(closes)) if closes[index - 1] > 0]
+            volatilities[code] = realized_volatility(returns)
+        return volatilities
 
     def _score_universe(
         self,

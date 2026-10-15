@@ -23,3 +23,20 @@ min_score: null
 
 # 缺任一必需因子的标的直接跳过（拿 0 顶替会造出假的"中性"信号）
 require_all_factors: true
+
+# ---- 组合层（默认全部关闭 = 等权满仓的朴素行为）----
+# 分配方案：equal（等权）/ score（按得分加权，负分标的排除）/ rank（按排名）/ inverse_vol（逆波动率）
+weight_scheme: equal
+
+# 单标的上限与碎仓下限（null / 0 = 不启用）；上限截断后会把多余权重重新分配，不会偷偷变成现金
+max_weight: null
+min_weight: 0.0
+
+# 权重变化小于该值就不交易（抑制无效换手，代价是略微偏离理想权重）
+no_trade_band: 0.0
+
+# 单次调仓换手上限（null = 不限制）。注意换手口径是 0.5×Σ|Δw|，清仓 = 50%
+max_turnover: null
+
+# inverse_vol 方案估算波动率用的窗口
+volatility_window: 20

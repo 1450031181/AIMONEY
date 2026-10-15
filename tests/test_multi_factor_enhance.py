@@ -184,15 +184,35 @@ class _StubContext:
         positions: dict[str, object] | None = None,
         *,
         configured: bool = True,
+        cash: str = "1000000",
+        market_value: str = "0",
+        closes: dict[str, list[float]] | None = None,
     ) -> None:
         self._values = values
         self._positions = positions or {}
         self._configured = configured
+        self._cash = cash
+        self._market_value = market_value
+        self._closes = closes or {}
         self.strategy_id = "stub"
         self.trade_date = START
 
     def has_factors(self) -> bool:
         return self._configured
+
+    def account(self):  # type: ignore[no-untyped-def]
+        from decimal import Decimal
+
+        from engine.types import Account
+
+        return Account(
+            initial_cash=Decimal("1000000"),
+            cash=Decimal(self._cash),
+            market_value=Decimal(self._market_value),
+        )
+
+    def history(self, code: str, *, field: str = "close", window: int = 1, adj: str = "post") -> list:  # type: ignore[type-arg]
+        return self._closes.get(code, [])[-window:]
 
     def factor(self, name: str, code: str) -> float | None:
         return self._values.get(code, {}).get(name)
@@ -256,7 +276,12 @@ def test_策略对多因子加权与缺值跳过() -> None:
 def test_策略清仓跌出名单的持仓() -> None:
     strategy = MultiFactorEnhanceStrategy(params={"factors": ["f"], "top_k": 1, "rebalance_interval": 1})
     values = {"600000": {"f": 3.0}, "000001": {"f": 1.0}}
-    context = _StubContext(values, positions={"000001": object()})
+    context = _StubContext(
+        values,
+        positions={"000001": _position("000001", qty=10_000, price="10")},
+        cash="900000",
+        market_value="100000",
+    )
 
     signals = strategy.on_bar(context, _bars(tuple(values)))
 
@@ -274,6 +299,84 @@ def test_策略调仓节奏() -> None:
     counts = [len(strategy.on_bar(context, bars)) for _ in range(7)]
 
     assert counts == [1, 0, 0, 1, 0, 0, 1], "每 3 个交易日调仓一次"
+
+
+def _position(code: str, *, qty: int, price: str):
+    from decimal import Decimal
+
+    from engine.types import Position
+
+    return Position(code=code, qty=qty, avail_qty=qty, last_price=Decimal(price))
+
+
+def test_策略按得分加权() -> None:
+    strategy = MultiFactorEnhanceStrategy(
+        params={"factors": ["f"], "top_k": 2, "rebalance_interval": 1, "weight_scheme": "score"}
+    )
+    values = {"600000": {"f": 3.0}, "000001": {"f": 1.0}}
+    context = _StubContext(values)
+
+    signals = strategy.on_bar(context, _bars(tuple(values)))
+    weights = {signal.code: float(signal.target_weight) for signal in signals}
+
+    assert weights["600000"] > weights["000001"], "得分高者权重更大"
+    assert sum(weights.values()) == pytest.approx(0.95), "总仓位仍由 total_weight 约束"
+
+
+def test_策略单标的上限生效() -> None:
+    strategy = MultiFactorEnhanceStrategy(
+        params={"factors": ["f"], "top_k": 2, "rebalance_interval": 1, "max_weight": 0.3}
+    )
+    values = {"600000": {"f": 2.0}, "000001": {"f": 1.0}}
+    context = _StubContext(values)
+
+    signals = strategy.on_bar(context, _bars(tuple(values)))
+
+    assert all(float(signal.target_weight) <= 0.3 + 1e-9 for signal in signals), "不得超过单标的上限"
+    assert strategy.last_decision is not None
+    assert strategy.last_decision.cash_weight > 0, "容量不足时应留现金而不是破上限"
+
+
+def test_策略无交易带抑制无效调仓() -> None:
+    """目标权重与当前权重接近时不应产生换手。"""
+    strategy = MultiFactorEnhanceStrategy(
+        params={"factors": ["f"], "top_k": 2, "rebalance_interval": 1, "no_trade_band": 0.05}
+    )
+    values = {"600000": {"f": 2.0}, "000001": {"f": 1.0}}
+    # 当前各持 50%（总资产 100 万），目标 47.5% → 差异 2.5% 小于 5% 的无交易带
+    context = _StubContext(
+        values,
+        positions={
+            "600000": _position("600000", qty=50_000, price="10"),
+            "000001": _position("000001", qty=50_000, price="10"),
+        },
+        cash="0",
+        market_value="1000000",
+    )
+
+    strategy.on_bar(context, _bars(tuple(values)))
+
+    assert strategy.last_decision is not None
+    assert strategy.last_decision.turnover == pytest.approx(0.0), "权重几乎没变就不该交易"
+
+
+def test_策略逆波动率加权() -> None:
+    strategy = MultiFactorEnhanceStrategy(
+        params={"factors": ["f"], "top_k": 2, "rebalance_interval": 1, "weight_scheme": "inverse_vol"}
+    )
+    values = {"600000": {"f": 2.0}, "000001": {"f": 2.0}}
+    context = _StubContext(
+        values,
+        closes={
+            "600000": [10.0, 10.1, 10.05, 10.12, 10.08],  # 低波动
+            "000001": [10.0, 11.0, 9.5, 10.8, 9.6],  # 高波动
+        },
+    )
+
+    signals = strategy.on_bar(context, _bars(tuple(values)))
+    weights = {signal.code: float(signal.target_weight) for signal in signals}
+
+    assert weights["600000"] > weights["000001"], "波动低的标的应获得更高权重"
 
 
 def test_策略未配置因子时明确报错() -> None:
