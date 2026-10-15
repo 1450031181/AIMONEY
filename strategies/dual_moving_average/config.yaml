@@ -1,0 +1,4 @@
+# 双均线默认参数（CLI --params fast=3 可覆盖）
+fast: 5
+slow: 20
+target_weight: 0.95

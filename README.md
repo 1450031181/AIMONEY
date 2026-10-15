@@ -24,7 +24,11 @@ $env:AIMONEY_MASTER_KEY = "<上一步输出>"
 .venv\Scripts\aimoney-data.exe check --date 2026-10-15
 .venv\Scripts\aimoney-data.exe coverage
 
-# 4) 起服务（可选）
+# 4) 跑第一个回测（内置双均线示例策略，报告落盘 data/backtests/）
+.venv\Scripts\aimoney-backtest.exe --strategy strategies/dual_moving_average `
+    --start 2026-09-01 --end 2026-10-22 --codes 600000 --params fast=3 --params slow=10
+
+# 5) 起服务（可选）
 .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -44,6 +48,23 @@ Linux/macOS 把 `.venv\Scripts\` 换成 `.venv/bin/`。
 
 **退出码是调度契约**：`0` 正常 / `1` 数据侧问题（同步有失败标的、质量 FAIL）/ `2` 用法错误。
 定时任务与 CI 依赖它判断"今天的数据能不能用"。
+
+## 2.1 回测（`aimoney-backtest`）
+
+```powershell
+aimoney-backtest --strategy strategies/dual_moving_average `
+    --start 2026-09-01 --end 2026-10-22 `
+    [--codes 600000] [--cash 1000000] [--slippage-bps 5] `
+    [--params fast=3 --params slow=10] [--json]
+```
+
+- 策略目录约定：`strategy.py`（定义 `create_strategy(params) -> Strategy`）+ 可选 `config.yaml`；
+- 输出：控制台摘要 + `data/backtests/<策略>_<时间戳>/` 下的 `metrics.json`、`nav.csv`、`trades.csv`；
+- 回测严格模拟 A 股规则：T+1、涨跌停、停牌顺延、单笔 ≤ 当日成交量 10%、含费资金约束、固定滑点；
+- 读 CSV 时记得 `dtype={"code": str}`——`"000001"` 会被推断成整数 `1`。
+
+内置模板：`DualMovingAverageStrategy`（教学/冒烟）、`MomentumRotationStrategy`（定期调仓 + top_k 等权，接近实盘可用）。
+多因子选股模板将在 P2 因子层就绪后提供。
 
 常用参数：`--root <目录>` 指定数据根目录，`--config <文件>` 指定配置文件，`--verbose` 打开 DEBUG 日志。
 

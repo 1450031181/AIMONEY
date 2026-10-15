@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    settings = _load_settings(args)
+    settings = load_settings(args)
     setup_logging(
         level="DEBUG" if args.verbose else settings.log.level,
         json_output=False,
@@ -115,14 +115,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return handlers[args.command](args, settings)
     except AimoneyError as exc:
-        print(f"[{exc.code}] {exc.message}", file=sys.stderr)
+        # str(exc) 携带 detail（含 hint），排障信息必须完整输出
+        print(f"[{exc.code}] {exc}", file=sys.stderr)
         return EXIT_DATA_PROBLEM
     except KeyboardInterrupt:  # pragma: no cover
         print("已中断", file=sys.stderr)
         return EXIT_DATA_PROBLEM
 
 
-def _load_settings(args: argparse.Namespace) -> Settings:
+def load_settings(args: argparse.Namespace) -> Settings:
     if args.config:
         config_path = Path(str(args.config)).expanduser()
         if not config_path.is_file():
@@ -161,7 +162,7 @@ def _cmd_list(_args: argparse.Namespace, settings: Settings) -> int:
                     str(attributes["data_version"] or "-"),
                 ]
             )
-    _print_table(["数据集", "行数", "标的数", "起始", "结束", "分区", "数据版本"], rows)
+    print_table(["数据集", "行数", "标的数", "起始", "结束", "分区", "数据版本"], rows)
     return EXIT_OK
 
 
@@ -174,7 +175,7 @@ def _cmd_coverage(args: argparse.Namespace, settings: Settings) -> int:
 
     dataset = payload["dataset"]
     gate = payload["gate"]
-    _print_table(
+    print_table(
         ["数据集", "行数", "标的数", "起始", "结束", "分区", "数据版本", "最新同步"],
         [
             [
@@ -206,15 +207,15 @@ def _cmd_sync(args: argparse.Namespace, settings: Settings) -> int:
         task_log=_task_log(settings),
         dataset=str(args.dataset),
         calendar=None,
-        full_backfill_start=_parse_date(args.start) if args.full else None,
+        full_backfill_start=parse_date(args.start) if args.full else None,
         reference_store=_reference_store(settings),
     )
     codes = _resolve_codes(args, settings)
     result = task.run(
         codes=codes,
-        start=_parse_date(args.start),
-        end=_parse_date(args.end),
-        trade_date=_parse_date(args.trade_date),
+        start=parse_date(args.start),
+        end=parse_date(args.end),
+        trade_date=parse_date(args.trade_date),
     )
 
     print(f"同步结果：{result.summary()}")
@@ -238,7 +239,7 @@ def _cmd_index_members(args: argparse.Namespace, settings: Settings) -> int:
         task_log=_task_log(settings),
         index_codes=_split(args.index) or DEFAULT_INDEX_CODES,
     )
-    result = task.run(on=_parse_date(args.date))
+    result = task.run(on=parse_date(args.date))
 
     for index_code, count in result.added.items():
         print(f"{index_code}: 登记 {count} 只成分（生效日 {result.as_of}）")
@@ -253,7 +254,7 @@ def _cmd_index_members(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _cmd_check(args: argparse.Namespace, settings: Settings) -> int:
-    as_of = _parse_date(args.date) or date.today()
+    as_of = parse_date(args.date) or date.today()
     expected: Sequence[str] | None = None
     if args.index:
         expected = _index_universe(settings, str(args.index), as_of)
@@ -309,8 +310,8 @@ def _resolve_codes(args: argparse.Namespace, settings: Settings) -> list[str] | 
     index_codes = _split(getattr(args, "index", None))
     if index_codes:
         as_of = (
-            _parse_date(getattr(args, "trade_date", None))
-            or _parse_date(getattr(args, "end", None))
+            parse_date(getattr(args, "trade_date", None))
+            or parse_date(getattr(args, "end", None))
             or date.today()
         )
         codes: set[str] = set()
@@ -352,7 +353,7 @@ def _split(value: str | Sequence[str] | None) -> list[str]:
     return result
 
 
-def _parse_date(value: str | None) -> date | None:
+def parse_date(value: str | None) -> date | None:
     if not value:
         return None
     try:
@@ -370,7 +371,7 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(width - _display_width(text), 0)
 
 
-def _print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
+def print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
     cells = [[str(cell) for cell in row] for row in rows]
     widths = [
         max([_display_width(str(header)), *(_display_width(row[index]) for row in cells)])
