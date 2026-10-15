@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Final
+from typing import Any, Final
 
 from engine.backtest.cost import FeeModel
 from engine.backtest.match import FillStatus, MatchEngine
@@ -48,6 +49,40 @@ _ZERO: Final[Decimal] = Decimal(0)
 DEFAULT_MAX_DEFER_DAYS: Final[int] = 2
 
 
+@dataclass(frozen=True, slots=True)
+class OpenOrderRecord:
+    """在途委托的**冻结台账**（可序列化）。
+
+    跨日运行必须把它一起落盘：只存账户与持仓会让昨天的挂单今天无人撮合，
+    而账户里的冻结资金变成一笔永远解不开的悬空额度。
+    """
+
+    order_id: str
+    broker_order_id: str
+    frozen_cash: Decimal = _ZERO
+    frozen_qty: int = 0
+    defer_days: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "order_id": self.order_id,
+            "broker_order_id": self.broker_order_id,
+            "frozen_cash": str(self.frozen_cash),
+            "frozen_qty": self.frozen_qty,
+            "defer_days": self.defer_days,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> OpenOrderRecord:
+        return cls(
+            order_id=str(payload["order_id"]),
+            broker_order_id=str(payload["broker_order_id"]),
+            frozen_cash=Decimal(str(payload.get("frozen_cash", 0))),
+            frozen_qty=int(payload.get("frozen_qty", 0)),
+            defer_days=int(payload.get("defer_days", 0)),
+        )
+
+
 class _OpenOrder:
     """券商侧的在途委托（含冻结资源台账，撤单/废单时按此归还）。"""
 
@@ -59,6 +94,15 @@ class _OpenOrder:
         self.frozen_cash: Decimal = _ZERO
         self.frozen_qty: int = 0
         self.defer_days = 0
+
+    def to_record(self) -> OpenOrderRecord:
+        return OpenOrderRecord(
+            order_id=self.order.order_id,
+            broker_order_id=self.broker_order_id,
+            frozen_cash=self.frozen_cash,
+            frozen_qty=self.frozen_qty,
+            defer_days=self.defer_days,
+        )
 
 
 class PaperBrokerAdapter:
@@ -181,6 +225,58 @@ class PaperBrokerAdapter:
 
     def push_bar(self, bar: Bar) -> list[Trade]:
         return self.push_bars({bar.code: bar})
+
+    @property
+    def last_prices(self) -> dict[str, Decimal]:
+        """最近一次行情价（冻结资金的参考价；持久化后跨日可用）。"""
+        return dict(self._last_prices)
+
+    def open_order_records(self) -> tuple[OpenOrderRecord, ...]:
+        """在途委托的冻结台账（持久化用）。"""
+        return tuple(entry.to_record() for entry in self._open.values())
+
+    def restore(
+        self,
+        *,
+        account: Account,
+        positions: Mapping[str, Position],
+        last_prices: Mapping[str, Decimal] | None = None,
+        orders: Mapping[str, Order] | None = None,
+        open_orders: Sequence[OpenOrderRecord] = (),
+    ) -> None:
+        """从持久化快照恢复账户、持仓**与在途委托**（模拟盘跨日运行的必需能力）。
+
+        在途委托必须一起恢复：否则昨天的挂单今天无人撮合，
+        账户里的冻结资金会变成一笔永远解不开的悬空额度。
+
+        ``orders`` 是本地委托账本（``order_id → Order``），用来把在途台账绑回具体委托；
+        绑不上的记录（账本缺失或不一致）会被跳过并告警，而不是凭空造一个委托。
+        """
+        if self._open:
+            raise ValidationError(
+                "存在在途委托时禁止恢复账本（先做查单校准）", detail={"open_orders": len(self._open)}
+            )
+        self._account = account
+        self._positions = dict(positions.items())
+        if last_prices:
+            self._last_prices.update(last_prices)
+
+        by_id = dict(orders or {})
+        self._open = {}
+        for record in open_orders:
+            order = by_id.get(record.order_id)
+            if order is None or not order.is_open:
+                _logger.warning("在途台账绑不上本地委托，已跳过：%s", record.order_id)
+                continue
+            entry = _OpenOrder(record.broker_order_id, order)
+            entry.frozen_cash = record.frozen_cash
+            entry.frozen_qty = record.frozen_qty
+            entry.defer_days = record.defer_days
+            self._open[record.broker_order_id] = entry
+        # 幂等索引也一起重建：否则重启后同幂等键的重复报单会被当成新委托
+        for order in by_id.values():
+            if order.idem_key and order.broker_order_id:
+                self._idem_index[order.idem_key] = order.broker_order_id
 
     def roll_to_next_day(self) -> None:
         """日切：T+1 解冻（昨日买入转为可卖）。"""
@@ -363,4 +459,4 @@ class PaperBrokerAdapter:
             callback(trade)
 
 
-__all__ = ["DEFAULT_MAX_DEFER_DAYS", "PaperBrokerAdapter"]
+__all__ = ["DEFAULT_MAX_DEFER_DAYS", "OpenOrderRecord", "PaperBrokerAdapter"]

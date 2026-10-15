@@ -77,6 +77,7 @@ all = [
 aimoney-data = "app.cli:main"
 aimoney-backtest = "app.backtest_cli:main"
 aimoney-factor = "app.factor_cli:main"
+aimoney-paper = "app.paper_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "engine"]

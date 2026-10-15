@@ -125,6 +125,21 @@ class OrderManager:
     def order(self, order_id: str) -> Order | None:
         return self._orders.get(order_id)
 
+    def restore(self, orders: Sequence[Order]) -> int:
+        """从本地账本恢复委托，返回恢复条数。
+
+        **这是"跨进程幂等"的前提**：重启后若幂等键集合为空，
+        同一笔计划会被当成新委托再报一次。
+        """
+        for order in orders:
+            self._orders[order.order_id] = order
+            # 已终结的委托也占住幂等键：与进程内行为一致（"宁可少下一笔，不可重复下一笔"）。
+            # 想重试被拒的委托，必须改变业务要素（数量/方向）或显式给新的 seq。
+            if order.idem_key:
+                self._by_idem[order.idem_key] = order.order_id
+        _logger.info("恢复委托账本 %s 条（在途 %s 条）", len(orders), sum(1 for o in orders if o.is_open))
+        return len(orders)
+
     # ============================================================ 报单
     def submit(
         self,
