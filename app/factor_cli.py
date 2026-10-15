@@ -19,9 +19,15 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
+import pandas as pd
+
 from app.cli import load_settings, parse_date, print_table
 from app.core.logging import setup_logging
-from app.services.factor_service import FactorEvaluationRequest, FactorService
+from app.services.factor_service import (
+    FactorCombineRequest,
+    FactorEvaluationRequest,
+    FactorService,
+)
 from engine.errors import AimoneyError
 from engine.factor.base import list_factors
 
@@ -55,6 +61,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--dataset", default="daily")
     evaluate.add_argument("--json", action="store_true", help="以 JSON 输出完整结果")
+
+    combine = subparsers.add_parser("combine", help="多因子合成与选股名单")
+    combine.add_argument("--factors", required=True, action="append", help="因子名，逗号分隔或重复传参")
+    combine.add_argument("--start", required=True, help="开始日期 YYYY-MM-DD")
+    combine.add_argument("--end", required=True, help="结束日期 YYYY-MM-DD")
+    combine.add_argument("--codes", action="append", help="限定标的（默认全部在市标的）")
+    combine.add_argument("--method", default="icir", choices=["equal", "ic", "icir"], help="合成方法（默认 icir）")
+    combine.add_argument("--weight-window", type=int, default=20, help="权重估计的滚动窗口（默认 20 个截面）")
+    combine.add_argument("--top-k", type=int, default=10, help="选股名单数量（默认 10）")
+    combine.add_argument("--correlation-threshold", type=float, default=0.7, help="去重相关性阈值（默认 0.7）")
+    combine.add_argument("--min-abs-ic", type=float, default=0.0, help="|IC| 低于该值的因子权重置零")
+    combine.add_argument("--horizon", type=int, default=1)
+    combine.add_argument("--quantiles", type=int, default=5)
+    combine.add_argument("--min-cross-section", type=int, default=5)
+    combine.add_argument("--preprocess", default="winsorize,rank,zscore")
+    combine.add_argument("--dataset", default="daily")
+    combine.add_argument("--json", action="store_true")
     return parser
 
 
@@ -69,7 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         force=True,
     )
 
-    handlers = {"list": _cmd_list, "evaluate": _cmd_evaluate}
+    handlers = {"list": _cmd_list, "evaluate": _cmd_evaluate, "combine": _cmd_combine}
     try:
         return handlers[args.command](args, settings)
     except AimoneyError as exc:
@@ -143,6 +166,40 @@ def _cmd_evaluate(args: argparse.Namespace, settings: Any) -> int:
                 for row in report.correlation.index
             ],
         )
+    print(f"\n报告目录：{report.output_dir}")
+    return EXIT_OK
+
+
+def _cmd_combine(args: argparse.Namespace, settings: Any) -> int:
+    request = FactorCombineRequest(
+        factors=tuple(_split(args.factors)),
+        start=_require_date(str(args.start), "start"),
+        end=_require_date(str(args.end), "end"),
+        codes=tuple(_split(getattr(args, "codes", None))),
+        horizon=int(args.horizon),
+        quantiles=int(args.quantiles),
+        min_cross_section=int(args.min_cross_section),
+        preprocess_steps=_parse_steps(str(args.preprocess)),
+        dataset=str(args.dataset),
+        method=str(args.method),
+        weight_window=int(args.weight_window),
+        top_k=int(args.top_k),
+        correlation_threshold=float(args.correlation_threshold),
+        min_abs_ic=float(args.min_abs_ic),
+    )
+    report = FactorService(settings).run_combine(request)
+
+    if args.json:
+        payload = report.to_jsonable()
+        payload["output_dir"] = str(report.output_dir)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return EXIT_OK
+
+    print(report.summary())
+    if not report.weights.empty:
+        active = report.weights.tail(1).iloc[0]
+        weights_text = "，".join(f"{name} {float(value):+.2f}" for name, value in active.items())
+        print(f"  最新权重（{pd.Timestamp(report.weights.index[-1]).date()}）：{weights_text}")
     print(f"\n报告目录：{report.output_dir}")
     return EXIT_OK
 

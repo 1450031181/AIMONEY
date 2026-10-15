@@ -12,6 +12,16 @@ from engine.factor.base import (
     list_factors,
     register_factor,
 )
+from engine.factor.combine import (
+    DEFAULT_CORRELATION_THRESHOLD,
+    SUPPORTED_METHODS,
+    composite_score,
+    deduplicate_factors,
+    normalize_weights,
+    rolling_ic_weights,
+    select_top,
+    weights_from_ic,
+)
 from engine.factor.engine import compute_factors
 from engine.factor.evaluate import (
     EvaluationConfig,
@@ -31,11 +41,15 @@ from engine.factor.preprocess import (
 )
 
 __all__ = [
+    "DEFAULT_CORRELATION_THRESHOLD",
+    "SUPPORTED_METHODS",
     "EvaluationConfig",
     "FactorDefinition",
     "FactorEvaluation",
     "PreprocessConfig",
+    "composite_score",
     "compute_factors",
+    "deduplicate_factors",
     "demean",
     "evaluate_factor",
     "factor",
@@ -45,9 +59,13 @@ __all__ = [
     "get_factor",
     "information_coefficient",
     "list_factors",
+    "normalize_weights",
     "preprocess_cross_section",
     "rank_pct",
     "register_factor",
+    "rolling_ic_weights",
+    "select_top",
+    "weights_from_ic",
     "winsorize_mad",
     "zscore",
 ]
