@@ -76,6 +76,7 @@ all = [
 # CLI 归 app 层：它需要读配置与初始化日志，而 engine 不允许依赖 app
 aimoney-data = "app.cli:main"
 aimoney-backtest = "app.backtest_cli:main"
+aimoney-factor = "app.factor_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "engine"]
