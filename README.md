@@ -1,8 +1,25 @@
 # AIMoney
 
-全自动量化交易系统 —— 研究、回测、自动交易一体化。当前完成 **P0 阶段（数据底座）**。
+全自动量化交易系统 —— 研究、回测、自动交易一体化。设计原则一句话：
+**engine 是纯计算内核，app 才是 IO 与编排**。这条约束决定了所有目录边界。
 
-设计原则一句话：**engine 是纯计算内核，app 才是 IO 与编排**。这条约束决定了所有目录边界。
+## 0. 当前状态（2026-10-15）
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| P0 数据底座 | 同步 / 复权 / 股票池 / 质量门禁 / DuckDB 查询 / CLI / HTTP | ✅（真实历史全量回填受数据源限流阻塞） |
+| P1 回测闭环 | 撮合（T+1/涨跌停/停牌/量约束）、成本滑点、绩效指标、策略模板、`aimoney-backtest` | ✅ |
+| P2 因子工厂 | 21 个内置因子、预处理、IC/ICIR/分层/换手评价、多因子合成、因子快照接入策略、`aimoney-factor` | ✅ |
+| P3 组合层 | 分配方案（等权/得分/排名/逆波动率）+ 上限/碎仓/无交易带/换手约束 | ✅ |
+| P4 风控 | 事前 8 条 + 事中 3 条规则、急停开关、回测与实盘同一条链 | ✅ |
+| P5 实盘链路 | 模拟盘券商、订单管理（幂等/闸门/查单校准）、账本持久化、`aimoney-paper`、`aimoney-schedule` | ✅（模拟盘，非真实券商） |
+| P6 进阶 | 组合优化、参数寻优、Walk-Forward、AI 因子 | ⬜ |
+
+未实现的部分集中在「前端 / 告警 / 真实券商 / 盘中高频 / 分钟线与财务数据」——
+完整清单与原因见 [§7 已知缺口](#7-已知缺口)。**593 条用例**，`ruff` 与 `mypy --strict`（82 个源文件）全绿。
+
+五个命令行入口：`aimoney-data`（数据）、`aimoney-backtest`（回测）、`aimoney-factor`（因子）、
+`aimoney-paper`（模拟盘）、`aimoney-schedule`（盘前/盘后调度）。
 
 ---
 
@@ -28,9 +45,23 @@ $env:AIMONEY_MASTER_KEY = "<上一步输出>"
 .venv\Scripts\aimoney-backtest.exe --strategy strategies/dual_moving_average `
     --start 2026-09-01 --end 2026-10-22 --codes 600000 --params fast=3 --params slow=10
 
-# 5) 起服务（可选）
+# 5) 多因子：先评价因子，再跑多因子策略回测（必须用 --factors 把因子喂给回测）
+.venv\Scripts\aimoney-factor.exe evaluate --factors mom_20,rev_5,vol_20 `
+    --start 2026-09-01 --end 2026-10-12
+.venv\Scripts\aimoney-backtest.exe --strategy strategies/multi_factor_enhance `
+    --start 2026-08-17 --end 2026-10-09 --factors mom_20,vol_20
+
+# 6) 模拟盘：盘前（同步 + 质量校验）与盘后（跑一天 + 查单校准），定时任务每天各调一次
+.venv\Scripts\aimoney-schedule.exe once --job pre  --date 2026-10-15 --codes "600000,000001"
+.venv\Scripts\aimoney-schedule.exe once --job post --date 2026-10-15 `
+    --strategy strategies/multi_factor_enhance --factors mom_20,vol_20
+
+# 7) 起服务（可选）
 .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+> 注意 PowerShell 会**吃掉前导零**：`--codes 600000,000001` 会被解析成 `[600000, 1]`。
+> 给列表加引号，或重复传参（`--codes 000001`）。
 
 Linux/macOS 把 `.venv\Scripts\` 换成 `.venv/bin/`。
 
@@ -267,6 +298,8 @@ aimoney-schedule plan --days 7
 
 ## 3. 接口
 
+当前**只有数据相关接口**（因子/回测/交易/风控/报告等 REST 路由尚未实现，对应能力目前只经 CLI 提供）：
+
 | 方法与路径 | 说明 |
 | --- | --- |
 | `GET /health` | 健康检查（含门禁状态） |
@@ -283,10 +316,14 @@ aimoney-schedule plan --days 7
 ```
 AIMoney/
 ├── app/                  # 应用层：IO、装配、编排
-│   ├── cli.py            # 命令行入口（aimoney-data）
+│   ├── cli.py            # aimoney-data（list/coverage/sync/index-members/check）
+│   ├── backtest_cli.py   # aimoney-backtest
+│   ├── factor_cli.py     # aimoney-factor（list/evaluate/combine）
+│   ├── paper_cli.py      # aimoney-paper（run/status）
+│   ├── schedule_cli.py   # aimoney-schedule（once/plan）
 │   ├── main.py           # FastAPI 入口 + 异常到 HTTP 的映射
-│   ├── api/v1/           # 路由层（只做参数校验与编排）
-│   ├── services/         # 应用服务（业务语义、事务边界）
+│   ├── api/v1/           # 路由层（只做参数校验与编排；当前仅 data）
+│   ├── services/         # 应用服务：data / backtest / factor / paper / schedule
 │   └── core/             # 配置 / 日志 / 加密 / 异常
 ├── engine/               # ★ 纯计算内核（禁止 import app）
 │   ├── ports.py          # 端口契约（DataSource/BrokerAdapter/Context...）
@@ -341,12 +378,18 @@ AIMoney/
 
 | 缺口 | 影响 | 计划 |
 | --- | --- | --- |
+| **真实券商适配器（QMT / miniQMT）** | 只能跑模拟盘；`BrokerAdapter` 端口与幂等/校准机制已就绪，缺的只是适配器与权限 | 需券商权限与环境（P5） |
+| **Web 前端与图表页** | 报告只能看 `metrics.json` / CSV；`frontend/` 目前仅占位 | 未排期 |
+| **告警通道（钉钉 / 企业微信）** | 任务失败只能靠结构化日志、任务日志与退出码发现 | 未排期 |
+| **盘中高频任务** | 当前只在日频跑一次（盘前同步 + 盘后下单），未做盘中信号与事中风控采样 | 依赖盘中行情 |
 | `stock_info.list_date` 为空（akshare 免费接口不提供） | 「次新股过滤」会被标注为**未生效**（`UniverseSelection.rules_not_applied`），不会静默失效 | 接入 Tushare Pro / 券商行情源 |
 | 涨跌停价无上游字段 | 由前收 × 板块阈值计算（T-09 已实现） | 如数据源提供则直接采用 |
 | akshare 免费接口限流 | 短时间多次调用会 `RemoteDisconnected`，同步按标的隔离失败并计入告警 | 双源可切换（设计文档已有扩展点） |
-| 分钟线 / 财务数据 | 未覆盖 | P3+ |
-| 因子表达式引擎（自定义公式） | 只支持内置因子，暂不支持用户写表达式 | P2 后续 |
-| 组合权重优化（均值方差 / 风险平价） | 合成层只做因子加权与等权名单，未做组合优化 | 组合层（P3） |
+| 分钟线 / 财务数据 | 未覆盖（T-14 / T-15 加档项） | P6 |
+| 因子表达式引擎（自定义公式） | 只支持内置 21 个量价因子，暂不支持用户写表达式 | P2 后续 |
+| 组合权重优化（均值方差 / 风险平价） | 组合层只做分配方案与约束，未做最优化求解 | P6 |
+| 收益归因（`attribution.py`） | 只有绩效指标，没有"收益来自哪些标的/因子"的分解 | 未排期 |
+| APScheduler 常驻调度 | 需要外部调度器（任务计划 / cron）每天调用 | 按需 |
 
 ---
 
