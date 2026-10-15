@@ -292,6 +292,29 @@ def test_成交通知与订单状态回调() -> None:
     assert trades == [1000]
 
 
+def test_恢复后委托簿可查且不被误判为废单() -> None:
+    """回归：restore() 曾漏掉委托簿，导致重启后 query_orders() 为空，
+    查单校准会把所有在途委托误判成废单并永久标记 REJECTED。"""
+    broker = _broker()
+    broker.place_order(_order(1000))
+    account = broker.query_account()
+    positions = {position.code: position for position in broker.query_positions()}
+    orders = list(broker.query_orders())
+
+    restarted = PaperBrokerAdapter(initial_cash="1000000")
+    restarted.connect()
+    restarted.restore(
+        account=account,
+        positions=positions,
+        last_prices=broker.last_prices,
+        orders={order.order_id: order for order in orders},
+        open_orders=broker.open_order_records(),
+    )
+
+    assert len(restarted.query_orders()) == 1, "恢复后必须能看到既有委托"
+    assert restarted.open_order_records(), "在途委托也要恢复"
+
+
 def test_初始资金必须为正() -> None:
     with pytest.raises(ValidationError):
         PaperBrokerAdapter(initial_cash="0")

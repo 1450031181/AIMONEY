@@ -262,6 +262,9 @@ class PaperBrokerAdapter:
             self._last_prices.update(last_prices)
 
         by_id = dict(orders or {})
+        # 委托簿必须一起恢复：否则重启后 query_orders() 返回空，
+        # 查单校准会把所有在途委托误判成"券商查无此单（废单）"并永久标记为 REJECTED。
+        self._orders = list(by_id.values())
         self._open = {}
         for record in open_orders:
             order = by_id.get(record.order_id)

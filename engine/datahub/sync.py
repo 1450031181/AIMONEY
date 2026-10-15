@@ -296,7 +296,15 @@ class DailySyncTask:
 
     def _all_codes(self, info: pd.DataFrame | None) -> list[str]:
         if info is None or "code" not in info.columns:
-            raise ValidationError("未能获取股票基础信息，无法确定同步标的范围")
+            raise ValidationError(
+                "未能获取股票基础信息，无法确定同步标的范围",
+                detail={
+                    "hint": (
+                        "数据源拉不到股票列表时，显式指定标的即可（sync --codes 600000,000001）；"
+                        "调度场景建议固定标的列表，避免因上游接口变动让盘前任务整体失败"
+                    )
+                },
+            )
         codes = info["code"].astype(str).tolist()
         # 已退市标的没有新行情，排除以免每次都失败进补偿队列
         if "delist_date" in info.columns:

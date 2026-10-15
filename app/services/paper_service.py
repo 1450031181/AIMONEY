@@ -45,7 +45,7 @@ from engine.risk.kill_switch import KillSwitch
 from engine.risk.rules import default_intraday_rules, default_pre_trade_rules
 from engine.strategy.loader import load_strategy
 from engine.trade.ledger import DEFAULT_LEDGER_FILE, BrokerSnapshot, JsonLedger
-from engine.trade.oms import OrderManager, SubmissionResult
+from engine.trade.oms import OrderManager, ReconcileResult, SubmissionResult
 from engine.types import Order
 
 _logger = logging.getLogger(__name__)
@@ -86,6 +86,11 @@ class PaperRunReport:
     @property
     def ok(self) -> bool:
         return self.skipped_reason is None
+
+    @property
+    def skipped(self) -> bool:
+        """是否被跳过（门禁/急停/无行情/该交易日已处理）。"""
+        return self.skipped_reason is not None
 
     def summary(self) -> str:
         if self.skipped_reason is not None:
@@ -246,6 +251,32 @@ class PaperTradingService:
         self._write_report(report)
         _logger.info("%s", report.summary())
         return report
+
+    def reconcile(self, request: PaperRunRequest) -> ReconcileResult:
+        """以券商全量委托为准校准本地账本（断线/重启/收盘后的例行动作）。
+
+        这是"账本会分叉"这件事的正式出口：报单成功后回报丢失、进程被杀、
+        网络抖动，都会让本地账本与券商状态不一致；不校准，
+        本地会一直以为某笔委托还在途（或以为它废了），后续所有换手决策都建立在错的前提上。
+        """
+        output_dir = self._output_dir(request)
+        ledger = JsonLedger(output_dir / DEFAULT_LEDGER_FILE)
+        if not ledger.exists:
+            return ReconcileResult()
+        restored_orders = ledger.load_orders()
+        broker, snapshot = self._restore_broker(ledger, request, restored_orders)
+        if snapshot is None:
+            return ReconcileResult()
+        # 校准不需要风控与闸门：它只对账，不下单
+        manager = OrderManager(broker=broker, kill_switch=KillSwitch(self.settings.kill_switch_file))
+        manager.restore(restored_orders)
+        try:
+            result = manager.reconcile()
+        finally:
+            # 保持"最后处理日"不变：校准不是"处理了一个交易日"，不得推进日级防重
+            self._persist(ledger, broker, manager, snapshot.last_trade_date or request.trade_date)
+        _logger.info("账本校准：%s", result.summary())
+        return result
 
     # ============================================================ 装配
     def _build_manager(
@@ -412,4 +443,4 @@ def _declared_factors(params: Mapping[str, Any]) -> tuple[str, ...]:
     return ()
 
 
-__all__ = ["NAV_FILE", "PaperRunReport", "PaperRunRequest", "PaperTradingService"]
+__all__ = ["NAV_FILE", "PaperRunReport", "PaperRunRequest", "PaperTradingService", "ReconcileResult"]
