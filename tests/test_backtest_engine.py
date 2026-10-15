@@ -130,6 +130,65 @@ def _run(strategy: Strategy, **overrides: object) -> BacktestResult:
     return engine.run()
 
 
+def _adjusted_frame() -> pd.DataFrame:
+    """真实价 10 元、存储（后复权）价 20 元：模拟"有过分红送转"的标的。"""
+    return pd.DataFrame(
+        [
+            {
+                "code": "600000",
+                "date": f"2026-10-{day:02d}",
+                "open": 20.0,
+                "high": 20.0,
+                "low": 20.0,
+                "close": 20.0,
+                "volume": 1_000_000,
+                "amount": 20_000_000,
+                "adj_factor": 2.0,
+            }
+            for day in (12, 13, 14)
+        ]
+    )
+
+
+# ============================================================ 复权口径（回归）
+def test_撮合按真实价而非后复权价成交() -> None:
+    """回归：曾把**后复权价**直接喂给撮合器。
+
+    在没有分红送转的数据（``adj_factor == 1``）上完全看不出来；一旦因子 ≠ 1，
+    用真实人民币按放大后的价格成交 → 仓位被系统性缩小 ``1/F``，
+    且与上游的真实价涨跌停比较必然错乱。这类错误不会报任何异常。
+    """
+    config = BacktestConfig(start=START, end=date(2026, 10, 14), initial_cash="1000000", slippage_bps=0.0)
+    engine = BacktestEngine(
+        config,
+        provider=DataFrameBarProvider(_adjusted_frame()),
+        strategy=OneShotStrategy({"600000": 0.95}),
+    )
+    result = engine.run()
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.price == Decimal("10.00"), "成交价必须是真实价（后复权价 20 ÷ 因子 2）"
+    assert trade.qty == 95_000, "95 万 ÷ 真实价 10 = 95,000 股；若用后复权价会只剩 47,500 股"
+    assert result.final_account.market_value == Decimal("950000.00")
+
+
+def test_bar取真实价而history取后复权() -> None:
+    """两条通道的口径必须分开：``bars`` 是执行口径，``history`` 是计算口径。
+
+    若 ``history`` 也返回真实价，除权日会产生假跳变（收益/均线/动量全部失真）；
+    若 ``bars`` 返回后复权价，撮合与涨跌停判断全部错。
+    """
+    provider = DataFrameBarProvider(_adjusted_frame())
+    bar = provider.bars_on(START)["600000"]
+
+    assert bar.close == Decimal("10.00"), "执行口径：真实价"
+    assert bar.adj_factor == Decimal("2.0"), "因子保留在 bar 上供还原与排查"
+    assert provider.history("600000", field="close", end=START, window=1) == [Decimal("20.0")], (
+        "计算口径：后复权"
+    )
+
+
 # ============================================================ 基本成交
 def test_信号次日开盘成交而非当日() -> None:
     # 权重取 0.95：目标数量低于含费可买上限，一笔即可完成（权重 1.0 会因费用产生部分成交余量）

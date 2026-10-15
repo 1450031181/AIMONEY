@@ -365,6 +365,44 @@ class Order:
     def cancel(self, reason: str | None = None) -> None:
         self.transition_to(OrderStatus.CANCELED, reason=reason)
 
+    def sync_from_broker(self, broker_order: Order) -> bool:
+        """按券商委托校准本地状态（查单校准路径），返回是否发生了变更。
+
+        两个必须做对的地方：
+
+        1. **成交以券商为准**：成交数量/均价直接覆盖本地（本地不认识部分成交的中间态）。
+        2. **状态仍走状态机**：券商状态可能是本地当前状态不可直达的。最典型的是
+           "报单成功但回报丢失"——本地停在 ``PENDING``，而券商已经 ``FILLED``；
+           此时先补一次 ``SUBMITTED`` 再迁移，而不是绕过状态机直接赋值。
+           状态机是"不产生重复委托、不错记持仓"的第一道防线，校准不能例外。
+        """
+        if not 0 <= broker_order.filled_qty <= self.qty:
+            raise ValidationError(
+                "券商成交数量越界，拒绝校准",
+                detail={"order_id": self.order_id, "broker_filled": broker_order.filled_qty, "qty": self.qty},
+            )
+        changed = False
+        if broker_order.filled_qty != self.filled_qty or broker_order.avg_price != self.avg_price:
+            self.filled_qty = broker_order.filled_qty
+            self.avg_price = broker_order.avg_price
+            changed = True
+
+        target = broker_order.status
+        if target is self.status:
+            return changed
+        if not self.can_transition_to(target) and self.can_transition_to(OrderStatus.SUBMITTED):
+            # 补齐"回报丢失"造成的缺口：本地 PENDING/UNKNOWN，券商已推进
+            self.transition_to(OrderStatus.SUBMITTED, broker_order_id=broker_order.broker_order_id)
+            changed = True
+        if not self.can_transition_to(target):
+            return changed
+        self.transition_to(
+            target,
+            reason=broker_order.reject_reason or "券商状态校准",
+            broker_order_id=broker_order.broker_order_id,
+        )
+        return True
+
     def apply_fill(self, fill_qty: int, fill_price: Decimal | float | str) -> None:
         """回填成交：自动计算加权均价并把状态推进到 PARTIAL / FILLED。"""
         price = to_decimal(fill_price)

@@ -14,6 +14,7 @@ from typing import Any, Final
 
 import pandas as pd
 
+from engine.datahub.adjust import restore_real_price
 from engine.datahub.schema import DAILY_REQUIRED_COLUMNS, ensure_columns
 from engine.errors import LookaheadError, ValidationError
 from engine.types import Bar
@@ -98,25 +99,43 @@ class DataFrameBarProvider:
     # -------------------------------------------------- 内部
     @staticmethod
     def _to_bar(row: pd.Series, day: date) -> Bar:
+        """把存储行转成 ``Bar``。
+
+        **价格一律还原成真实价**（``adj_factor = 后复权价 / 真实价``）。原因是 ``Bar``
+        是**执行口径**：撮合按它定价、资金按人民币结算、涨跌停与限价也按它比较。
+        若直接放后复权价（存储口径），在 ``adj_factor ≠ 1``（存在分红送转）的标的上会
+        **静默**出现两类错误：
+
+        1. 用真实人民币按放大后的价格成交 → 实际仓位被系统性缩小 ``1/F``；
+        2. 上游给的涨跌停/前收是真实价，与后复权成交价比大小必然错乱。
+
+        需要**计算口径**（后复权）的地方走 ``history()`` / ``Context.history(field=...)``，
+        那条通道默认返回后复权序列（收益、均线、动量必须用它，否则除权日出假跳变）。
+        """
+        factor = Decimal(str(row.get("adj_factor", 1) or 1))
+
         def optional(column: str) -> Decimal | None:
             if column not in row.index or pd.isna(row[column]):
                 return None
             return Decimal(str(row[column]))
 
+        def real(column: str) -> Decimal:
+            return restore_real_price(Decimal(str(row[column])), factor)
+
         suspended = bool(row["is_suspended"]) if "is_suspended" in row.index and pd.notna(row["is_suspended"]) else False
         return Bar(
             code=str(row["code"]),
             dt=pd.Timestamp(day),
-            open=Decimal(str(row["open"])),
-            high=Decimal(str(row["high"])),
-            low=Decimal(str(row["low"])),
-            close=Decimal(str(row["close"])),
+            open=real("open"),
+            high=real("high"),
+            low=real("low"),
+            close=real("close"),
             volume=int(row["volume"]),
             amount=Decimal(str(row.get("amount", 0))),
             limit_up=optional("limit_up"),
             limit_down=optional("limit_down"),
             is_suspended=suspended,
-            adj_factor=Decimal(str(row.get("adj_factor", 1))),
+            adj_factor=factor,
         )
 
 

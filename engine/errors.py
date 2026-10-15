@@ -117,6 +117,13 @@ class InsufficientPosition(RiskRejected):
 
 
 class BrokerError(AimoneyError):
+    """券商接口层错误：未连接、报单失败、撤销失败。
+
+    与 ``OrderRejected`` 的区别：本异常表示**通道/接口层面**的问题
+    （连接断了、对端拒绝、参数非法），而非交易规则层面的拒单——
+    前者应重试或走校准，后者说明这笔委托本身不该发。
+    """
+
     code = "BROKER_ERROR"
     http_status = 502
 
