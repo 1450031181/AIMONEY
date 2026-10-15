@@ -1,0 +1,40 @@
+# ---- 密钥与配置（严禁入库）----
+conf/secrets.yaml
+*.key
+*.pem
+
+# ---- 数据落盘目录（体积大，绝不入库）----
+# 注意：必须写成 data/* 才能用 ! 例外保留 .gitkeep；
+# 若写 data/ 会连目录一起忽略，git 不会进入该目录，例外规则失效。
+data/*
+!data/.gitkeep
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 运行产物 ----
+logs/
+*.log
+*.duckdb
+*.duckdb.wal
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- 前端 ----
+node_modules/
+frontend/dist/

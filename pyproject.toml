@@ -1,0 +1,126 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aimoney"
+version = "0.1.0"
+description = "AIMoney 全自动量化交易系统（研究 + 自动交易一体化）"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "AIMoney" }]
+keywords = ["quant", "trading", "backtest", "a-share"]
+
+# 核心运行时依赖：保持轻量，保证 engine 可在最小环境下运行
+dependencies = [
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "PyYAML>=6.0",
+    "structlog>=24.1",
+    "cryptography>=43.0",
+    "tenacity>=8.5",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# 数据计算与存储（T-07 起需要）
+data = [
+    "polars>=1.9",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pyarrow>=17.0",
+    "duckdb>=1.1",
+]
+# 行情数据源适配器（T-06 起需要）
+source = ["akshare>=1.14"]
+# Web 服务与实时推送
+web = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "websockets>=13.0",
+]
+# 调度、业务库与缓存
+service = [
+    "apscheduler>=3.10",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "redis>=5.0",
+]
+# 测试与静态检查
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "pytest-benchmark>=4.0",
+    "ruff>=0.7",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+    "pandas-stubs>=2.2",
+]
+all = [
+    "polars>=1.9",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pyarrow>=17.0",
+    "duckdb>=1.1",
+    "akshare>=1.14",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "websockets>=13.0",
+    "apscheduler>=3.10",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "redis>=5.0",
+]
+
+[project.scripts]
+# CLI 归 app 层：它需要读配置与初始化日志，而 engine 不允许依赖 app
+aimoney-data = "app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 默认排除联网用例：外网抖动不该让日常红灯被忽略（需联网时显式 pytest -m network）
+addopts = '-q --strict-markers -m "not network"'
+markers = [
+    "slow: 慢速用例（全市场/长区间）",
+    "network: 需要外网（数据源接口）",
+    "benchmark: 性能基准",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["data", "frontend", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "ARG", "PTH", "RUF"]
+# RUF001/002/003 是"全角/易混淆字符"检查：本项目中英文注释，全角标点是刻意选择，不是笔误
+# N818 要求异常名以 Error 结尾：本项目的领域异常名（如 InsufficientFunds）比 xxxError 更贴近业务语义
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "N818"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试函数使用中文名提升可读性，与 N802（函数名小写）约定冲突
+"tests/**" = ["ARG", "S101", "N802"]
+"strategies/**" = ["N802", "ARG"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "engine"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["app", "engine"]
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["akshare.*", "xtquant.*", "polars.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["app", "engine"]
+omit = ["tests/*", "*/templates/*"]

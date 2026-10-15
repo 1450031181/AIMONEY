@@ -1,0 +1,1 @@
+# 运行时数据目录占位文件：行情 parquet、duckdb、日志都写在这里（内容已被 .gitignore 排除）。

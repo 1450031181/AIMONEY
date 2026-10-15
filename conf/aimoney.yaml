@@ -1,0 +1,29 @@
+# AIMoney 主配置（可安全入库）
+# 优先级：字段默认值 < 本文件 < 环境变量（AIMONEY_ 前缀，嵌套用 __ 分隔） < 代码传参
+#   例：AIMONEY_LOG__LEVEL=DEBUG / AIMONEY_DATA__MAX_RETRIES=5
+# 路径留空（null）时由程序按项目根目录自动推导，跨机器部署无需改配置。
+
+app:
+  name: aimoney
+  env: dev          # dev / test / prod
+  debug: true
+
+log:
+  level: INFO
+  json_output: false  # prod 建议 true，便于日志采集
+  dir: null           # 默认 <项目根>/data/logs
+
+data:
+  root: null        # 默认 <项目根>/data
+  parquet_dir: null # 默认 <data.root>/parquet
+  duckdb_path: null # 默认 <data.root>/duckdb/aimoney.duckdb
+  secrets_file: null # 默认 <项目根>/conf/secrets.yaml
+  request_interval: 0.3   # 数据源请求最小间隔（秒），防止被限流封禁
+  max_retries: 3
+  retry_backoff: 1.5
+  # 数据质量门禁阈值（超出即判定 FAIL，当日禁止自动交易）
+  quality:
+    max_missing_ratio: 0.01      # 全市场单日行情缺失率上限
+    continuity_tolerance: 0.02   # 复权连续性探针容差（板块涨跌停幅度之外额外允许的波动）
+    max_volume_jump_ratio: 10.0  # 成交量突增倍数上限（相对前 20 日中位数）
+    trade_gate_on_fail: true     # FAIL 时关闭交易门禁
