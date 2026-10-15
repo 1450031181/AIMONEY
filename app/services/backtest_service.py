@@ -31,6 +31,9 @@ from engine.errors import ValidationError
 from engine.factor.base import get_factor
 from engine.factor.preprocess import DEFAULT_STEPS
 from engine.factor.snapshot import FactorSnapshot, build_snapshot_from_prices
+from engine.risk.engine import RiskEngine
+from engine.risk.kill_switch import KillSwitch
+from engine.risk.rules import default_intraday_rules, default_pre_trade_rules
 from engine.strategy.loader import load_strategy
 
 _logger = logging.getLogger(__name__)
@@ -52,6 +55,10 @@ class BacktestRequest:
     #: 需要提供给策略的因子（非空时自动计算快照；多因子策略依赖它）
     factors: tuple[str, ...] = ()
     factor_preprocess: tuple[str, ...] = DEFAULT_STEPS
+    #: 是否启用风控（默认启用；关闭只应出现在研究调试场景）
+    risk_enabled: bool = True
+    #: 单票集中度上限覆盖（None 表示用配置里的值）
+    max_weight: float | None = None
 
     def __post_init__(self) -> None:
         if self.start > self.end:
@@ -76,13 +83,26 @@ class BacktestRunReport:
 
     def summary(self) -> str:
         metrics = self.result.metrics
-        return (
+        text = (
             f"[{self.strategy_id}] {self.start}~{self.end}（{self.result.trading_days} 个交易日）"
             f" 总收益 {metrics.total_return:+.2%}，年化 {metrics.annual_return:+.2%}，"
             f"最大回撤 {metrics.max_drawdown:.2%}，夏普 {metrics.sharpe_ratio:.2f}，"
             f"成交 {len(self.result.trades)} 笔"
-            + (f"，⚠ 策略停仓：{self.result.halted}" if self.result.halted else "")
         )
+        risk_parts: list[str] = []
+        if self.result.risk_shrinks:
+            risk_parts.append(f"缩量 {self.result.risk_shrinks} 笔")
+        if self.result.risk_rejections:
+            risk_parts.append(f"拒单 {len(self.result.risk_rejections)} 笔")
+        if self.result.risk_level_events:
+            risk_parts.append(
+                f"触线降级 {len(self.result.risk_level_events)} 次（最近 {self.result.risk_level_events[-1][1]}）"
+            )
+        if risk_parts:
+            text += "；风控：" + "，".join(risk_parts)
+        if self.result.halted:
+            text += f"，⚠ 策略停仓：{self.result.halted}"
+        return text
 
 
 class BacktestService:
@@ -127,11 +147,13 @@ class BacktestService:
             risk_free_rate=request.risk_free_rate,
         )
         snapshot = self._factor_snapshot(local, request, codes=request.codes)
+        risk_engine = self._risk_engine(request)
         engine = BacktestEngine(
             config,
             provider=DataFrameBarProvider(frame),
             strategy=loaded.strategy,
             factors=snapshot,
+            risk_engine=risk_engine,
         )
         result = engine.run()
 
@@ -152,6 +174,26 @@ class BacktestService:
         )
 
     # ============================================================ 内部
+    def _risk_engine(self, request: BacktestRequest) -> RiskEngine | None:
+        """按配置装配风控引擎（回测与实盘共用同一套规则）。"""
+        limits = self.settings.risk
+        if not limits.enabled or not request.risk_enabled:
+            _logger.warning("风控已关闭：仅适用于研究调试，实盘链路必须保持启用")
+            return None
+        return RiskEngine(
+            pre_trade_rules=default_pre_trade_rules(
+                switch=KillSwitch(self.settings.kill_switch_file),
+                max_weight=request.max_weight if request.max_weight is not None else limits.max_weight,
+                max_order_value=limits.max_order_value,
+                max_orders_per_day=limits.max_orders_per_day,
+            ),
+            intraday_rules=default_intraday_rules(
+                max_drawdown=limits.max_drawdown,
+                max_daily_loss=limits.max_daily_loss,
+                liquidation_drawdown=limits.liquidation_drawdown,
+            ),
+        )
+
     @staticmethod
     def _validate_factor_config(params: Mapping[str, Any], provided: tuple[str, ...]) -> None:
         raw = params.get("factors")
@@ -247,6 +289,25 @@ class BacktestService:
                 "codes": list(request.codes) or "universe",
                 "factors": list(request.factors),
                 "factor_preprocess": list(request.factor_preprocess),
+                "risk_enabled": bool(self.settings.risk.enabled and request.risk_enabled),
+                "risk_limits": {
+                    "max_weight": request.max_weight
+                    if request.max_weight is not None
+                    else self.settings.risk.max_weight,
+                    "max_order_value": str(self.settings.risk.max_order_value),
+                    "max_orders_per_day": self.settings.risk.max_orders_per_day,
+                    "max_drawdown": self.settings.risk.max_drawdown,
+                    "max_daily_loss": self.settings.risk.max_daily_loss,
+                    "liquidation_drawdown": self.settings.risk.liquidation_drawdown,
+                },
+            },
+            "risk": {
+                "rejections": [{"code": code, "reason": reason} for code, reason in result.risk_rejections],
+                "shrinks": result.risk_shrinks,
+                "level_events": [
+                    {"date": day, "level": level, "reason": reason}
+                    for day, level, reason in result.risk_level_events
+                ],
             },
             "metrics": result.metrics.to_jsonable(),
         }

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
@@ -61,6 +62,22 @@ class LogSection(_Section):
     dir: Path | None = None  # 默认 <data.root>/logs
 
 
+class RiskSection(_Section):
+    """风控阈值（事前限额 + 事中触线）。
+
+    ``enabled=False`` 只应出现在研究/调试场景：实盘链路必须保证风控在岗，
+    设计文档 D6「风控不可绕过」不是可选项。
+    """
+
+    enabled: bool = True
+    max_weight: float = Field(default=0.2, gt=0.0, le=1.0)
+    max_order_value: Decimal = Field(default=Decimal("200000"), gt=0)
+    max_orders_per_day: int = Field(default=100, gt=0)
+    max_drawdown: float = Field(default=0.1, gt=0.0, le=1.0)
+    max_daily_loss: float = Field(default=0.03, gt=0.0, le=1.0)
+    liquidation_drawdown: float = Field(default=0.2, gt=0.0, le=1.0)
+
+
 class QualitySection(_Section):
     """数据质量门禁阈值。超出即判定 FAIL —— 宁可当日空仓，不拿脏数据下单。
 
@@ -83,6 +100,7 @@ class DataSection(_Section):
     duckdb_path: Path | None = None
     quality_dir: Path | None = None
     gate_file: Path | None = None
+    kill_switch_file: Path | None = None
     secrets_file: Path | None = None
     #: 数据源请求最小间隔（秒），防限流封禁
     request_interval: float = Field(default=0.3, ge=0.0)
@@ -102,6 +120,8 @@ class DataSection(_Section):
             self.quality_dir = self.root / "quality"
         if self.gate_file is None:
             self.gate_file = self.root / "state" / "trade_gate.json"
+        if self.kill_switch_file is None:
+            self.kill_switch_file = self.root / "state" / "kill_switch.json"
         if self.secrets_file is None:
             self.secrets_file = PROJECT_ROOT / "conf" / "secrets.yaml"
         return self
@@ -127,6 +147,7 @@ class Settings(BaseSettings):
     app: AppSection = AppSection()
     log: LogSection = LogSection()
     data: DataSection = DataSection()
+    risk: RiskSection = RiskSection()
 
     # -------------------------------------------------- 配置源装配
     @classmethod
@@ -194,6 +215,11 @@ class Settings(BaseSettings):
     def gate_file(self) -> Path:
         assert self.data.gate_file is not None
         return self.data.gate_file
+
+    @property
+    def kill_switch_file(self) -> Path:
+        assert self.data.kill_switch_file is not None
+        return self.data.kill_switch_file
 
     def ensure_dirs(self) -> list[Path]:
         """创建运行所需目录，返回创建/确认过的目录列表（幂等）。"""

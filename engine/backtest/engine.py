@@ -20,7 +20,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
@@ -35,8 +35,34 @@ from engine.backtest.metrics import PerformanceMetrics, compute_metrics
 from engine.backtest.planner import PlannerConfig, TargetWeightPlanner
 from engine.backtest.slippage import FixedBpsSlippage, SlippageModel
 from engine.errors import ValidationError
-from engine.ports import Strategy
-from engine.types import Account, Bar, OrderPlan, Position, Side, Trade
+from engine.ports import PortfolioSnapshot, Strategy
+from engine.risk.engine import RiskEngine, RiskReview
+from engine.types import Account, Bar, OrderPlan, Position, RiskLevel, Side, Trade
+
+_LEVEL_ORDER: dict[RiskLevel, int] = {
+    RiskLevel.NORMAL: 0,
+    RiskLevel.WARN: 1,
+    RiskLevel.HALT: 2,
+    RiskLevel.FLATTEN: 3,
+}
+
+
+def _stricter_level(left: RiskLevel, right: RiskLevel) -> RiskLevel:
+    """取更严的风险等级（等级只升不降）。"""
+    return right if _LEVEL_ORDER[right] > _LEVEL_ORDER[left] else left
+
+
+def _cancel_pending_buys(pending: list[_Pending]) -> tuple[list[_Pending], list[tuple[str, str]]]:
+    """撤回未成交的买单，返回 ``(剩余挂单, 撤单记录)``（卖单保留）。"""
+    remaining = [item for item in pending if item.plan.side is not Side.BUY]
+    cancelled = [
+        (item.plan.code, "风控降级撤单：只平不开")
+        for item in pending
+        if item.plan.side is Side.BUY
+    ]
+    if cancelled:
+        _logger.warning("风控降级：撤回 %s 笔未成交买单", len(cancelled))
+    return remaining, cancelled
 
 _logger = logging.getLogger(__name__)
 
@@ -87,6 +113,12 @@ class BacktestResult:
     final_account: Account
     #: 策略异常停仓（FR-3.5）：非 None 表示策略在该日后不再产生信号，回测继续撮合存量挂单
     halted: str | None = None
+    #: 风控拒绝的计划（code + 原因），回测里如实记录，避免"信号被吞掉却无人知道"
+    risk_rejections: list[tuple[str, str]] = field(default_factory=list)
+    #: 风控缩量的计划数
+    risk_shrinks: int = 0
+    #: 事中触线记录（日期 + 降级后的等级 + 原因）
+    risk_level_events: list[tuple[str, str, str]] = field(default_factory=list)
 
     def trades_frame(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -124,10 +156,13 @@ class BacktestEngine:
         fee_model: FeeModel | None = None,
         slippage: SlippageModel | None = None,
         factors: FactorProvider | None = None,
+        risk_engine: RiskEngine | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
         self.strategy = strategy
+        #: 事前风控（可选）。回测接入后行为与实盘一致：被风控拒的计划不会进撮合队列
+        self.risk_engine = risk_engine
         #: 预计算因子快照（可选）。引擎按日切片后注入 Context，
         #: 使策略只能看到"当日"的因子值——多因子策略因此不可能读到未来因子。
         self.factors = factors
@@ -159,12 +194,31 @@ class BacktestEngine:
         nav_points: list[tuple[date, float]] = []
         total_signals = 0
         skipped_signals = 0
+        risk_rejections: list[tuple[str, str]] = []
+        risk_shrinks = 0
+        risk_level_events: list[tuple[str, str, str]] = []
+        risk_level = RiskLevel.NORMAL
+        peak_nav = 1.0
+        previous_close_asset = initial_cash
         halted: str | None = None
 
         self._call_init(days[0])
 
         for day in days:
             bars = self.provider.bars_on(day)
+
+            # ------------------------------------------------ 0) 事中风控（基于昨日收盘状态）
+            # 必须排在撮合之前：早上就已知昨天亏了多少，降级后当天就不该再买。
+            # 若排在撮合之后，"降级"会晚一天生效——昨天挂出的买单今天照样成交。
+            if self.risk_engine is not None:
+                risk_level, events = self._assess_portfolio(
+                    day, account, positions, risk_level, peak_nav, previous_close_asset
+                )
+                risk_level_events.extend(events)
+                if events and risk_level not in (RiskLevel.NORMAL, RiskLevel.WARN):
+                    # 撤回未成交的**买单**（卖单保留——降低暴露的操作不该被拦）
+                    pending, cancelled = _cancel_pending_buys(pending)
+                    risk_rejections.extend(cancelled)
 
             # ------------------------------------------------ 1) 撮合昨日挂单（按当日开盘成交）
             pending = self._match_pending(pending, bars, day, account, positions, trades, expired)
@@ -196,6 +250,11 @@ class BacktestEngine:
             # ------------------------------------------------ 3) 信号 → 订单计划（明日撮合）
             plans = self.planner.build(signals, trade_date=day, account=account, positions=positions, bars=bars)
             skipped_signals += len(signals) - len(plans)
+            if self.risk_engine is not None and plans:
+                approved, review = self._review_plans(plans, day, account, positions, bars, risk_level=risk_level)
+                plans = approved
+                risk_rejections.extend((item.plan.code, item.decision.message) for item in review.rejected)
+                risk_shrinks += review.shrank_count
             pending.extend(_Pending(plan=plan) for plan in plans)
 
             # ------------------------------------------------ 4) 盯市
@@ -204,8 +263,10 @@ class BacktestEngine:
                 if bar is not None and not bar.is_suspended:
                     position.last_price = bar.close
             account.mark_to_market(positions.values())
-            account.refresh_nav()
-            nav_points.append((day, account.nav))
+            nav_value = account.refresh_nav()
+            nav_points.append((day, nav_value))
+            peak_nav = max(peak_nav, nav_value)
+            previous_close_asset = account.total_asset
 
             # ------------------------------------------------ 5) 日切（T+1 解冻，供次日撮合）
             for position in positions.values():
@@ -229,7 +290,70 @@ class BacktestEngine:
             skipped_signals=skipped_signals,
             final_account=account,
             halted=halted,
+            risk_rejections=risk_rejections,
+            risk_shrinks=risk_shrinks,
+            risk_level_events=risk_level_events,
         )
+
+    def _assess_portfolio(
+        self,
+        day: date,
+        account: Account,
+        positions: dict[str, Position],
+        current_level: RiskLevel,
+        peak_nav: float,
+        previous_close_asset: Decimal,
+    ) -> tuple[RiskLevel, list[tuple[str, str, str]]]:
+        """组合级事中检查：回撤 / 单日亏损触线则降级。
+
+        等级**只升不降**（单向降级）：一旦触发 HALT，当日不会再自动恢复——
+        自动恢复会让"只平不开"形同虚设，人工确认后才应复位（见 ``RiskLevel`` 的语义）。
+        """
+        if self.risk_engine is None or not self.risk_engine.intraday_rules:
+            return current_level, []
+        drawdown = (account.nav / peak_nav - 1.0) if peak_nav > 0 else 0.0
+        # 先在 Decimal 域内算比率再转 float：Decimal 与 float 直接相减会抛 TypeError
+        day_pnl = float(account.total_asset / previous_close_asset) - 1.0 if previous_close_asset > 0 else 0.0
+        snapshot = PortfolioSnapshot(
+            trade_date=day,
+            account=account,
+            positions=positions,
+            risk_level=current_level,
+            day_pnl_ratio=day_pnl,
+            drawdown=drawdown,
+        )
+        level, decisions = self.risk_engine.check_portfolio(snapshot)
+        level = _stricter_level(current_level, level)
+        events: list[tuple[str, str, str]] = []
+        if level is not current_level:
+            events.append((day.isoformat(), str(level), "；".join(item.message for item in decisions)))
+        return level, events
+
+    def _review_plans(
+        self,
+        plans: list[OrderPlan],
+        day: date,
+        account: Account,
+        positions: dict[str, Position],
+        bars: Mapping[str, Bar],
+        *,
+        risk_level: RiskLevel = RiskLevel.NORMAL,
+    ) -> tuple[list[OrderPlan], RiskReview]:
+        """过一遍事前风控：通过的计划才进撮合队列。"""
+        if self.risk_engine is None:  # pragma: no cover —— 调用方已判空
+            return plans, RiskReview()
+        review = self.risk_engine.check_plans(
+            plans,
+            trade_date=day,
+            account=account,
+            positions=positions,
+            bars=bars,
+            risk_level=risk_level,
+            extra={"orders_today": len(plans)},
+        )
+        if review.rejected or review.shrank_count:
+            _logger.info("风控审核：%s", review.summary())
+        return [item.plan for item in review.approved], review
 
     def _factors_on(self, day: date) -> Mapping[str, Mapping[str, float]]:
         """当日可见因子值。未提供因子快照时返回空（策略会看到 factor() 全为 None）。"""

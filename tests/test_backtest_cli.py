@@ -144,6 +144,32 @@ def test_区间无数据时退出码为1并给出原因(tmp_path: Path, data_roo
     assert "VALIDATION_ERROR" in capsys.readouterr().err
 
 
+def test_风控上限通过CLI生效(data_root: Path, strategy_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """策略想买 47.5% 仓位，把单票上限压到 5% 后必须被缩量，并在报告里留痕。"""
+    assert main(_args(data_root, strategy_dir, "--max-weight", "0.05", "--json")) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    trades = pd.read_csv(Path(payload["output_dir"]) / "trades.csv", dtype={"code": str})
+    assert not trades.empty
+    assert trades["qty"].max() <= 5_000, f"风控未生效：成交 {trades['qty'].max()} 股"
+    assert payload["risk"]["shrinks"] >= 1, "缩量必须在报告中留痕"
+
+    report = json.loads((Path(payload["output_dir"]) / "metrics.json").read_text(encoding="utf-8"))
+    assert report["config"]["risk_limits"]["max_weight"] == 0.05
+    assert report["config"]["risk_enabled"] is True
+
+
+def test_关闭风控后仓位不再受限(data_root: Path, strategy_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(_args(data_root, strategy_dir, "--no-risk", "--json")) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    trades = pd.read_csv(Path(payload["output_dir"]) / "trades.csv", dtype={"code": str})
+    assert trades["qty"].max() > 40_000, "关闭风控后应恢复原始仓位"
+
+    report = json.loads((Path(payload["output_dir"]) / "metrics.json").read_text(encoding="utf-8"))
+    assert report["config"]["risk_enabled"] is False
+
+
 def test_坏参数格式退出码为1(data_root: Path, strategy_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = main(_args(data_root, strategy_dir, "--params", "no_value"))
 

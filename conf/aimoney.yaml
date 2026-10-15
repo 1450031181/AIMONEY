@@ -17,6 +17,8 @@ data:
   root: null        # 默认 <项目根>/data
   parquet_dir: null # 默认 <data.root>/parquet
   duckdb_path: null # 默认 <data.root>/duckdb/aimoney.duckdb
+  gate_file: null         # 默认 <data.root>/state/trade_gate.json（缺省=关闭，fail-safe）
+  kill_switch_file: null  # 默认 <data.root>/state/kill_switch.json（缺省=未激活）
   secrets_file: null # 默认 <项目根>/conf/secrets.yaml
   request_interval: 0.3   # 数据源请求最小间隔（秒），防止被限流封禁
   max_retries: 3
@@ -27,3 +29,13 @@ data:
     continuity_tolerance: 0.02   # 复权连续性探针容差（板块涨跌停幅度之外额外允许的波动）
     max_volume_jump_ratio: 10.0  # 成交量突增倍数上限（相对前 20 日中位数）
     trade_gate_on_fail: true     # FAIL 时关闭交易门禁
+
+# 风控：事前逐单限额 + 事中组合触线。实盘链路必须保持 enabled: true
+risk:
+  enabled: true
+  max_weight: 0.20            # 单票集中度上限（超限缩量，不拒单）
+  max_order_value: "200000"   # 单笔委托金额上限（元）
+  max_orders_per_day: 100     # 当日委托笔数上限
+  max_drawdown: 0.10          # 回撤触线 → HALT（只平不开）
+  max_daily_loss: 0.03        # 单日亏损触线 → HALT
+  liquidation_drawdown: 0.20  # 深度回撤 → FLATTEN（清仓）

@@ -245,10 +245,17 @@ class PortfolioSnapshot:
 
 
 class PreTradeRiskRule(Protocol):
-    """事前风控规则：逐条订单计划校验，可拒单或缩量。"""
+    """事前风控规则：逐条订单计划校验，可拒单或缩量。
 
-    name: str
-    priority: int
+    ``name`` / ``priority`` 声明为**只读属性**而不是可变属性：规则实现多为
+    ``frozen`` dataclass，其字段是只读的——若协议声明可变属性，冻结实现就无法满足它。
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def priority(self) -> int: ...
 
     def check(self, ctx: RiskContext) -> RiskDecision: ...
 
@@ -256,8 +263,11 @@ class PreTradeRiskRule(Protocol):
 class IntradayRiskRule(Protocol):
     """事中风控规则：组合级指标触线时降级（HALT / FLATTEN）。"""
 
-    name: str
-    priority: int
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def priority(self) -> int: ...
 
     def check_portfolio(self, snapshot: PortfolioSnapshot) -> RiskDecision: ...
 

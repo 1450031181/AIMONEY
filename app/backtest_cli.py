@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="winsorize,rank,zscore",
         help="因子截面预处理步骤（传 none 表示不做）",
     )
+    parser.add_argument(
+        "--no-risk",
+        action="store_true",
+        help="关闭风控（仅研究调试用；实盘链路必须保持启用）",
+    )
+    parser.add_argument("--max-weight", type=float, default=None, help="单票集中度上限（覆盖配置值）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出完整指标")
     return parser
 
@@ -82,6 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset=str(args.dataset),
             factors=tuple(_split_codes(args.factors)),
             factor_preprocess=_parse_preprocess(str(args.factor_preprocess)),
+            risk_enabled=not bool(args.no_risk),
+            max_weight=float(args.max_weight) if args.max_weight is not None else None,
         )
         report = BacktestService(settings).run(request)
     except AimoneyError as exc:
@@ -101,6 +109,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "halted": report.result.halted,
                     "trading_days": report.result.trading_days,
                     "metrics": report.metrics.to_jsonable(),
+                    "risk": {
+                        "rejections": [
+                            {"code": code, "reason": reason}
+                            for code, reason in report.result.risk_rejections
+                        ],
+                        "shrinks": report.result.risk_shrinks,
+                        "level_events": [
+                            {"date": day, "level": level, "reason": reason}
+                            for day, level, reason in report.result.risk_level_events
+                        ],
+                    },
                 },
                 ensure_ascii=False,
                 indent=2,
