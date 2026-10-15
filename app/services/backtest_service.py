@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -24,9 +24,13 @@ import pandas as pd
 from engine.backtest.data import DataFrameBarProvider
 from engine.backtest.engine import BacktestConfig, BacktestEngine, BacktestResult
 from engine.backtest.metrics import PerformanceMetrics
+from engine.datahub.calendar import warmup_start
 from engine.datahub.store import ParquetStore
 from engine.datasource.local_source import LocalDataSource
 from engine.errors import ValidationError
+from engine.factor.base import get_factor
+from engine.factor.preprocess import DEFAULT_STEPS
+from engine.factor.snapshot import FactorSnapshot, build_snapshot_from_prices
 from engine.strategy.loader import load_strategy
 
 _logger = logging.getLogger(__name__)
@@ -45,6 +49,9 @@ class BacktestRequest:
     max_delay_days: int = 2
     risk_free_rate: float = 0.02
     dataset: str = "daily"
+    #: 需要提供给策略的因子（非空时自动计算快照；多因子策略依赖它）
+    factors: tuple[str, ...] = ()
+    factor_preprocess: tuple[str, ...] = DEFAULT_STEPS
 
     def __post_init__(self) -> None:
         if self.start > self.end:
@@ -107,6 +114,9 @@ class BacktestService:
             )
 
         loaded = load_strategy(request.strategy_dir, params_override=request.params_override)
+        # 配置级校验：策略声明的因子必须都提供了。放在跑回测之前，
+        # 避免"因子名拼错 → 全程无信号 → 空回测"这种要翻报告才能发现的失败。
+        self._validate_factor_config(loaded.params, request.factors)
         config = BacktestConfig(
             start=request.start,
             end=request.end,
@@ -116,7 +126,13 @@ class BacktestService:
             max_delay_days=request.max_delay_days,
             risk_free_rate=request.risk_free_rate,
         )
-        engine = BacktestEngine(config, provider=DataFrameBarProvider(frame), strategy=loaded.strategy)
+        snapshot = self._factor_snapshot(local, request, codes=request.codes)
+        engine = BacktestEngine(
+            config,
+            provider=DataFrameBarProvider(frame),
+            strategy=loaded.strategy,
+            factors=snapshot,
+        )
         result = engine.run()
 
         output_dir = self._write_report(
@@ -136,6 +152,62 @@ class BacktestService:
         )
 
     # ============================================================ 内部
+    @staticmethod
+    def _validate_factor_config(params: Mapping[str, Any], provided: tuple[str, ...]) -> None:
+        raw = params.get("factors")
+        if isinstance(raw, str):
+            declared = tuple(part.strip() for part in raw.split(",") if part.strip())
+        elif isinstance(raw, Sequence):
+            declared = tuple(str(item) for item in raw)
+        else:
+            declared = ()
+        missing = [name for name in declared if name not in provided]
+        if missing:
+            raise ValidationError(
+                "策略声明需要的因子未通过 --factors 提供",
+                detail={
+                    "missing": missing,
+                    "declared": list(declared),
+                    "provided": list(provided),
+                    "hint": "回测时用 --factors 指定这些因子",
+                },
+            )
+
+    def _factor_snapshot(
+        self, local: LocalDataSource, request: BacktestRequest, *, codes: tuple[str, ...]
+    ) -> FactorSnapshot | None:
+        """按需构建因子快照（带预热期，避免回测初段因子全为 NaN）。"""
+        if not request.factors:
+            return None
+        definitions = [get_factor(name) for name in request.factors]
+        warmup = max(definition.window for definition in definitions)
+        calendar = local.trading_calendar()
+        load_start = warmup_start(calendar, request.start, warmup)
+
+        raw = local.daily(
+            list(codes) if codes else self._all_codes(local, request.end),
+            load_start,
+            request.end,
+            adj="post",
+        )
+        if raw.empty:
+            raise ValidationError(
+                "回测区间内没有可用于计算因子的行情",
+                detail={"start": load_start.isoformat(), "end": request.end.isoformat()},
+            )
+        snapshot = build_snapshot_from_prices(
+            raw,
+            factors=request.factors,
+            preprocess_steps=request.factor_preprocess,
+        )
+        _logger.info(
+            "因子快照就绪：%s（%s 个交易日，预热 %s 个交易日）",
+            ", ".join(request.factors),
+            len(snapshot.dates()),
+            warmup,
+        )
+        return snapshot
+
     def _all_codes(self, local: LocalDataSource, end: date) -> list[str]:
         """全部在市标的（退市标的没有新行情，排除）。"""
         info = local.stock_info()
@@ -173,6 +245,8 @@ class BacktestService:
                 "max_delay_days": request.max_delay_days,
                 "risk_free_rate": request.risk_free_rate,
                 "codes": list(request.codes) or "universe",
+                "factors": list(request.factors),
+                "factor_preprocess": list(request.factor_preprocess),
             },
             "metrics": result.metrics.to_jsonable(),
         }

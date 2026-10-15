@@ -56,6 +56,10 @@ aimoney-backtest --strategy strategies/dual_moving_average `
     --start 2026-09-01 --end 2026-10-22 `
     [--codes 600000] [--cash 1000000] [--slippage-bps 5] `
     [--params fast=3 --params slow=10] [--json]
+
+# 多因子策略：必须用 --factors 把因子喂给回测（否则策略会明确报错）
+aimoney-backtest --strategy strategies/multi_factor_enhance `
+    --start 2026-08-17 --end 2026-10-09 --factors mom_20,vol_20
 ```
 
 - 策略目录约定：`strategy.py`（定义 `create_strategy(params) -> Strategy`）+ 可选 `config.yaml`；
@@ -63,8 +67,13 @@ aimoney-backtest --strategy strategies/dual_moving_average `
 - 回测严格模拟 A 股规则：T+1、涨跌停、停牌顺延、单笔 ≤ 当日成交量 10%、含费资金约束、固定滑点；
 - 读 CSV 时记得 `dtype={"code": str}`——`"000001"` 会被推断成整数 `1`。
 
-内置模板：`DualMovingAverageStrategy`（教学/冒烟）、`MomentumRotationStrategy`（定期调仓 + top_k 等权，接近实盘可用）。
-多因子选股模板将在因子层进一步补齐后提供。
+内置模板：`DualMovingAverageStrategy`（教学/冒烟）、`MomentumRotationStrategy`（动量轮动）、
+`MultiFactorEnhanceStrategy`（多因子选股，需 `--factors` 提供因子）。
+
+**因子如何进入策略**：回测引擎把预计算的因子值按**当日切片**注入 `Context`，
+策略通过 `context.factor(name, code)` 取用——它拿不到其他日期的因子，
+越界在接口上不存在，而不是靠约定。缺值返回 `None`（预热期、停牌、数据缺口都属正常，
+策略可显式处理）；只有"回测压根没装载因子"才会明确报错。
 
 ## 2.2 因子工厂（`aimoney-factor`）
 
@@ -150,7 +159,7 @@ AIMoney/
 ├── data/                 # 运行时数据（已忽略）：parquet / reference / quality / state / logs
 ├── docs/                 # 需求 / 设计 / 任务 / 验收报告
 ├── strategies/           # 用户策略（P1 起）
-└── tests/                # 426 条用例（另有联网用例默认跳过）
+└── tests/                # 450 条用例（另有联网用例默认跳过）
 ```
 
 ---

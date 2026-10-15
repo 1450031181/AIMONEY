@@ -39,6 +39,12 @@ class BacktestContext:
     bars_today: Mapping[str, Bar] = field(default_factory=dict)
     account_state: Account = field(default_factory=lambda: Account())
     position_map: Mapping[str, Position] = field(default_factory=dict)
+    #: 当日可见的因子值 ``code → {factor: value}``（由引擎按日切片注入，
+    #: 策略无法访问其他日期——越界在接口上不存在，而不是靠约定）
+    factor_values: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    #: 回测是否**装载了**因子快照。用于区分两种完全不同的情况：
+    #: "因子根本没接入"（配置错误，应当报错）vs "今日无值"（预热期/停牌/缺数据，属于正常）
+    factors_configured: bool = False
 
     # -------------------------------------------------- 端口属性
     @property
@@ -72,9 +78,25 @@ class BacktestContext:
         """
         return self.provider.history(code, field=field, end=self.trade_date_value, window=window)
 
-    def factor(self, name: str, code: str) -> float | None:  # noqa: ARG002 —— 端口签名；P2 接入因子层后启用
-        """因子值（P1 未接因子层，返回 None；P2 接入后按 calc_date <= now 取用）。"""
-        return None
+    def factor(self, name: str, code: str) -> float | None:
+        """**当日**因子值（截面标准化后）。当日无该标的或该因子缺失时返回 None。
+
+        返回 None 而不是抛错，是刻意的：真实场景里"某标的某天没有因子值"很常见
+        （历史不足、次新股、数据缺口），策略必须显式处理它；
+        若抛错，策略作者就会写 try/except 把缺口悄悄吞掉。
+        """
+        return self.factor_values.get(code, {}).get(name)
+
+    def factor_names(self) -> tuple[str, ...]:
+        """**当日有值**的因子名（预热期可能为空，这属于正常）。"""
+        names: set[str] = set()
+        for values in self.factor_values.values():
+            names.update(values)
+        return tuple(sorted(names))
+
+    def has_factors(self) -> bool:
+        """回测是否装载了因子快照（与"今日是否有值"无关）。"""
+        return self.factors_configured
 
     def universe(self) -> tuple[str, ...]:
         return tuple(sorted(self.bars_today))

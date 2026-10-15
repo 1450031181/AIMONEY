@@ -1,0 +1,25 @@
+# 多因子增强策略默认参数（CLI --params 可覆盖）
+#
+# 注意：回测必须显式提供因子，否则策略会因读不到因子值而报错：
+#   aimoney-backtest --factors mom_20,vol_20 ...
+factors:
+  - mom_20
+  - vol_20
+
+# 各因子权重；留空或删除本项表示等权（截面标准化后等权是合理的基线）
+weights: null
+
+# 持仓只数（每只等权，总仓位在下方配置）
+top_k: 3
+
+# 调仓间隔（交易日）；越短换手越高，成本吃掉越多 IC
+rebalance_interval: 5
+
+# 总目标仓位（留现金以应对费用与滑点）
+total_weight: 0.95
+
+# 低于该得分不买（null 表示不启用）
+min_score: null
+
+# 缺任一必需因子的标的直接跳过（拿 0 顶替会造出假的"中性"信号）
+require_all_factors: true

@@ -143,4 +143,20 @@ def weekday_calendar(start: date, end: date, *, name: str = "weekday-approx") ->
     return TradingCalendarImpl(days=tuple(days), name=name)
 
 
+def warmup_start(calendar: TradingCalendarImpl, start: date, sessions: int) -> date:
+    """把起点前推 ``sessions`` 个交易日（因子预热用）。
+
+    日历不足以覆盖时**退化为最早交易日**而不是报错：此时窗口开头的因子值会是 NaN，
+    下游会自动跳过这些截面——这是诚实降级；报错则会让"数据刚够一天"的场景完全不可用，
+    而按短窗口硬算会产出系统性失真的值（最糟的选择）。
+    """
+    if sessions <= 0:
+        return start
+    try:
+        anchor = calendar.next_trade_day(start, include_self=True)
+        return calendar.shift(anchor, -sessions)
+    except ValidationError:
+        return calendar.first_day
+
+
 __all__ = ["DEFAULT_CALENDAR_NAME", "TradingCalendarImpl", "weekday_calendar"]

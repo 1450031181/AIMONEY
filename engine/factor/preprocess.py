@@ -21,6 +21,9 @@ from engine.errors import ValidationError
 
 _ALLOWED_STEPS = ("winsorize", "rank", "demean", "zscore")
 
+#: 默认预处理流水线（先 rank 再 zscore 对厚尾稳健，且让不同量纲的因子可横向合成）
+DEFAULT_STEPS: tuple[str, ...] = ("winsorize", "rank", "zscore")
+
 
 def winsorize_mad(values: pd.Series, *, n_mad: float = 5.0) -> pd.Series:
     """MAD 去极值：以中位数为中心、按 ``1.4826 × MAD`` 度量，超出 n 倍截断。"""
@@ -56,7 +59,7 @@ def demean(values: pd.Series) -> pd.Series:
 @dataclass(frozen=True, slots=True)
 class PreprocessConfig:
     winsorize_n_mad: float = 5.0
-    steps: tuple[str, ...] = ("winsorize", "rank", "zscore")
+    steps: tuple[str, ...] = DEFAULT_STEPS
 
     def __post_init__(self) -> None:
         unknown = [step for step in self.steps if step not in _ALLOWED_STEPS]
@@ -106,6 +109,7 @@ def _apply_step(values: pd.Series, step: str, config: PreprocessConfig) -> pd.Se
 
 
 __all__ = [
+    "DEFAULT_STEPS",
     "PreprocessConfig",
     "demean",
     "preprocess_cross_section",

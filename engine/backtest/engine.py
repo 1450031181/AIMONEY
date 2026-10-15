@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Protocol
 
 import pandas as pd
 
@@ -38,6 +39,17 @@ from engine.ports import Strategy
 from engine.types import Account, Bar, OrderPlan, Position, Side, Trade
 
 _logger = logging.getLogger(__name__)
+
+
+class FactorProvider(Protocol):
+    """回测所需的因子视图：按日给出**当日可见**的因子值。
+
+    刻意定义成 Protocol 而不是直接依赖 ``engine.factor.FactorSnapshot``：
+    回测内核不需要知道因子是怎么算出来的，只要"能按日取值"。
+    这样也避免 engine 内部模块之间出现不必要的耦合。
+    """
+
+    def values_on(self, day: date) -> Mapping[str, Mapping[str, float]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +123,14 @@ class BacktestEngine:
         strategy: Strategy,
         fee_model: FeeModel | None = None,
         slippage: SlippageModel | None = None,
+        factors: FactorProvider | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
         self.strategy = strategy
+        #: 预计算因子快照（可选）。引擎按日切片后注入 Context，
+        #: 使策略只能看到"当日"的因子值——多因子策略因此不可能读到未来因子。
+        self.factors = factors
         self.matcher = MatchEngine(
             MatcherConfig(
                 max_vol_ratio=config.max_vol_ratio,
@@ -161,6 +177,8 @@ class BacktestEngine:
                 bars_today=bars,
                 account_state=account,
                 position_map=dict(positions),
+                factor_values=self._factors_on(day),
+                factors_configured=self.factors is not None,
             )
             if halted is None:
                 # FR-3.5 策略沙箱：异常被捕获并停仓（不再产生新信号），存量挂单继续撮合，
@@ -213,6 +231,10 @@ class BacktestEngine:
             halted=halted,
         )
 
+    def _factors_on(self, day: date) -> Mapping[str, Mapping[str, float]]:
+        """当日可见因子值。未提供因子快照时返回空（策略会看到 factor() 全为 None）。"""
+        return self.factors.values_on(day) if self.factors is not None else {}
+
     def _call_init(self, first_day: date) -> None:
         """调用策略 init（fail-fast：初始化失败直接终止回测，而不是带着半初始化状态运行）。"""
         context = BacktestContext(
@@ -220,6 +242,8 @@ class BacktestEngine:
             strategy_id=self.strategy.strategy_id,
             trade_date_value=first_day,
             bars_today=self.provider.bars_on(first_day),
+            factor_values=self._factors_on(first_day),
+            factors_configured=self.factors is not None,
         )
         self.strategy.init(context)
 
@@ -304,4 +328,4 @@ class BacktestEngine:
         trades.append(trade)
 
 
-__all__ = ["BacktestConfig", "BacktestEngine", "BacktestResult"]
+__all__ = ["BacktestConfig", "BacktestEngine", "BacktestResult", "FactorProvider"]

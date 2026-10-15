@@ -43,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-vol-ratio", type=float, default=0.10)
     parser.add_argument("--max-delay-days", type=int, default=2)
     parser.add_argument("--dataset", default="daily")
+    parser.add_argument(
+        "--factors",
+        action="append",
+        help="提供给策略的因子（逗号分隔或重复传参）；多因子策略必需",
+    )
+    parser.add_argument(
+        "--factor-preprocess",
+        default="winsorize,rank,zscore",
+        help="因子截面预处理步骤（传 none 表示不做）",
+    )
     parser.add_argument("--json", action="store_true", help="以 JSON 输出完整指标")
     return parser
 
@@ -70,6 +80,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_vol_ratio=float(args.max_vol_ratio),
             max_delay_days=int(args.max_delay_days),
             dataset=str(args.dataset),
+            factors=tuple(_split_codes(args.factors)),
+            factor_preprocess=_parse_preprocess(str(args.factor_preprocess)),
         )
         report = BacktestService(settings).run(request)
     except AimoneyError as exc:
@@ -129,6 +141,13 @@ def _split_codes(values: list[str] | None) -> list[str]:
     for value in values or []:
         codes.extend(part.strip() for part in str(value).split(",") if part.strip())
     return codes
+
+
+def _parse_preprocess(raw: str) -> tuple[str, ...]:
+    text = raw.strip()
+    if text.lower() in ("none", "", "-"):
+        return ()
+    return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
 def _parse_params(values: list[str] | None) -> dict[str, Any]:
