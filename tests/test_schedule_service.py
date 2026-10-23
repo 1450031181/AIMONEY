@@ -269,9 +269,11 @@ def test_盘后跑策略并校准(settings: Settings, strategy_dir: Path) -> Non
         JobKind.POST_MARKET, day=TRADE_DAY
     )
 
-    assert [step.name for step in report.steps] == ["paper", "reconcile"]
+    assert [step.name for step in report.steps] == ["paper", "reconcile", "report"]
     assert report.ok, report.summary()
     assert "报单" in (report.step("paper").detail or "")
+    # 日报是"把已落盘的事实整理成人能读的形式"，跑完应能直接看到报告目录
+    assert "报告目录" in (report.step("report").detail or "")
 
 
 def test_盘后未指定策略时全部跳过(settings: Settings) -> None:

@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, time
 from typing import Any, Protocol
 
 from engine.errors import BrokerError
@@ -44,6 +44,10 @@ from engine.types import (
 )
 
 _logger = logging.getLogger(__name__)
+
+#: 信号决策时点（收盘后）。委托的 ``created_at`` 用"交易日 + 该时点"，
+#: 而不是墙钟——补跑历史某天时墙钟会让日报的"当日委托"全部落到今天。
+_SIGNAL_TIME = time(15, 0)
 
 
 class _GateLike(Protocol):
@@ -287,6 +291,10 @@ class OrderManager:
             price=plan.limit_price,
             order_type=OrderType.LIMIT if plan.limit_price is not None else OrderType.MARKET,
             idem_key=self.build_idem_key(plan, trade_date),
+            # created_at 语义是"这笔委托属于哪个交易日"（盘后决策时点），而不是墙钟：
+            # 补跑历史某天时若用墙钟，日报的"当日委托"会全部落到今天。
+            # 实盘里两者是同一天，因此不影响真实场景。
+            created_at=datetime.combine(trade_date, _SIGNAL_TIME),
         )
 
     def _remember(self, order: Order, *, broker_order_id: str | None = None) -> None:

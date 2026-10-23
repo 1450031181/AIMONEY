@@ -197,8 +197,8 @@ class PaperTradingService:
         # 卖出计划会被"可卖不足"错误地缩量甚至拒单。
         broker.roll_to_next_day()
 
-        # ---- 1) 推送行情：更新参考价并撮合昨日挂单
-        matched = broker.push_bars(day_bars)
+        # ---- 1) 推送行情：更新参考价并撮合昨日挂单（成交时间以模拟交易日为准）
+        matched = broker.push_bars(day_bars, on=request.trade_date)
 
         # ---- 2) 策略决策（与回测同一套 Context/策略代码）
         context = BacktestContext(
@@ -318,6 +318,7 @@ class PaperTradingService:
                 last_prices=snapshot.last_prices,
                 orders=orders,
                 open_orders=tuple(OpenOrderRecord.from_dict(item) for item in snapshot.open_orders),
+                trades=ledger.load_trades(),
             )
             _logger.info(
                 "已恢复模拟盘账本：现金 %s，持仓 %s 只，在途委托 %s 笔",
@@ -390,6 +391,9 @@ class PaperTradingService:
             last_trade_date=trade_date,
         )
         ledger.save_orders(manager.orders())
+        # 成交流水同样落盘：归因、对账明细与成本分析都依赖完整历史，
+        # 只存委托会让"成交明细"在重启后凭空消失
+        ledger.save_trades(broker.query_trades())
 
     def _append_nav(self, output_dir: Path, trade_date: date, account: Any) -> float:
         """净值历史追加到 JSONL（每天一行，便于直接画曲线）。"""

@@ -32,13 +32,14 @@ from typing import Any
 
 from app.core.config import Settings
 from app.services.paper_service import PaperRunReport, PaperRunRequest, PaperTradingService
+from app.services.report_service import DailyReportRequest, ReportService
 from engine.datahub.quality import QualityCheckTask, QualityThresholds, TradeGate
 from engine.datahub.reference import ReferenceStore
 from engine.datahub.store import ParquetStore
 from engine.datahub.sync import DailySyncTask
 from engine.datahub.tasklog import JsonlTaskLog
 from engine.datasource.local_source import LocalDataSource
-from engine.errors import AimoneyError, ValidationError
+from engine.errors import AimoneyError, NotFoundError, ValidationError
 from engine.ports import DataSource, TradingCalendar
 
 _logger = logging.getLogger(__name__)
@@ -262,6 +263,11 @@ class ScheduleService:
             steps.append(StepResult(name="reconcile", status=StepStatus.SKIPPED, detail="未指定策略目录"))
         else:
             steps.append(self._step("reconcile", lambda: self._reconcile(day)))
+        # 日报放在最后：它只是把已落盘的事实整理成人能读的形式，失败不影响交易与对账
+        if self.strategy_dir is None:
+            steps.append(StepResult(name="report", status=StepStatus.SKIPPED, detail="未指定策略目录"))
+        else:
+            steps.append(self._step("report", lambda: self._daily_report(day)))
 
         report = JobReport(job=JobKind.POST_MARKET, trade_date=day, status=StepStatus.OK, steps=steps)
         if any(step.failed for step in steps):
@@ -284,6 +290,16 @@ class ScheduleService:
         if report.skipped:
             return StepStatus.SKIPPED, report.skipped_reason or "跳过"
         return StepStatus.OK, report.summary()
+
+    def _daily_report(self, day: date) -> tuple[StepStatus, str]:
+        """生成当日报告。没有账本（门禁关闭/尚未跑过）时**跳过**，不当作失败。"""
+        try:
+            report = ReportService(self.settings).daily(
+                DailyReportRequest(strategy_dir=self._strategy_dir(), trade_date=day)
+            )
+        except NotFoundError:
+            return StepStatus.SKIPPED, "无模拟盘账本，跳过日报"
+        return StepStatus.OK, f"{report.summary()}；报告目录 {report.output_dir}"
 
     def _reconcile(self, day: date) -> tuple[StepStatus, str]:
         request = PaperRunRequest(strategy_dir=self._strategy_dir(), trade_date=day, codes=self.codes)

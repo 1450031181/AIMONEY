@@ -79,6 +79,7 @@ aimoney-backtest = "app.backtest_cli:main"
 aimoney-factor = "app.factor_cli:main"
 aimoney-paper = "app.paper_cli:main"
 aimoney-schedule = "app.schedule_cli:main"
+aimoney-report = "app.report_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "engine"]

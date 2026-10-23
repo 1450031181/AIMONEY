@@ -24,7 +24,7 @@ from typing import Any, Final
 
 from engine.datahub.jsonio import to_jsonable
 from engine.errors import ValidationError
-from engine.types import Account, Order, OrderStatus, OrderType, Position, Side
+from engine.types import Account, Order, OrderStatus, OrderType, Position, Side, Trade
 
 _logger = logging.getLogger(__name__)
 
@@ -106,6 +106,23 @@ class JsonLedger:
         if payload is None:
             return []
         return [_order_from_dict(item) for item in payload.get("orders", [])]
+
+    def save_trades(self, trades: Sequence[Trade]) -> Path:
+        """保存**全部**成交流水（覆盖写）。
+
+        调用方必须传入完整历史（券商台账恢复后的全量），不能只传增量——
+        覆盖语义下传增量会丢掉 earlier 的成交，而归因、对账、成本分析都依赖完整流水。
+        """
+        payload = self._read() or {"schema_version": _SCHEMA_VERSION}
+        payload["saved_at"] = datetime.now().isoformat(timespec="seconds")
+        payload["trades"] = [_trade_to_dict(trade) for trade in trades]
+        return self._write(payload)
+
+    def load_trades(self) -> list[Trade]:
+        payload = self._read()
+        if payload is None:
+            return []
+        return [_trade_from_dict(item) for item in payload.get("trades", [])]
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -236,6 +253,40 @@ def _order_from_dict(payload: Mapping[str, Any]) -> Order:
     if created is not None:
         order.created_at = created
     return order
+
+
+def _trade_to_dict(trade: Trade) -> dict[str, Any]:
+    return {
+        "trade_id": trade.trade_id,
+        "code": trade.code,
+        "side": str(trade.side),
+        "qty": trade.qty,
+        "price": str(trade.price),
+        "order_id": trade.order_id,
+        "strategy_id": trade.strategy_id,
+        "commission": str(trade.commission),
+        "stamp_tax": str(trade.stamp_tax),
+        "transfer_fee": str(trade.transfer_fee),
+        "slippage_cost": str(trade.slippage_cost),
+        "trade_time": trade.trade_time.isoformat(timespec="seconds"),
+    }
+
+
+def _trade_from_dict(payload: Mapping[str, Any]) -> Trade:
+    return Trade(
+        code=str(payload["code"]),
+        side=Side(str(payload["side"])),
+        qty=int(payload["qty"]),
+        price=Decimal(str(payload["price"])),
+        order_id=str(payload.get("order_id", "")),
+        strategy_id=str(payload.get("strategy_id", "")),
+        commission=Decimal(str(payload.get("commission", 0))),
+        stamp_tax=Decimal(str(payload.get("stamp_tax", 0))),
+        transfer_fee=Decimal(str(payload.get("transfer_fee", 0))),
+        slippage_cost=Decimal(str(payload.get("slippage_cost", 0))),
+        trade_id=str(payload["trade_id"]),
+        trade_time=_parse_datetime(payload.get("trade_time")) or datetime.now(),
+    )
 
 
 def _parse_datetime(value: object) -> datetime | None:

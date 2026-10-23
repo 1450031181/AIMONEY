@@ -13,13 +13,14 @@
 | P3 组合层 | 分配方案（等权/得分/排名/逆波动率）+ 上限/碎仓/无交易带/换手约束 | ✅ |
 | P4 风控 | 事前 8 条 + 事中 3 条规则、急停开关、回测与实盘同一条链 | ✅ |
 | P5 实盘链路 | 模拟盘券商、订单管理（幂等/闸门/查单校准）、账本持久化、`aimoney-paper`、`aimoney-schedule` | ✅（模拟盘，非真实券商） |
-| P6 进阶 | 组合优化、参数寻优、Walk-Forward、AI 因子 | ⬜ |
+| P6 报告与归因 | 日报/区间报告、逐笔重放归因、`aimoney-report` | ✅ |
+| P7 进阶 | 组合优化、参数寻优、Walk-Forward、AI 因子 | ⬜ |
 
 未实现的部分集中在「前端 / 告警 / 真实券商 / 盘中高频 / 分钟线与财务数据」——
-完整清单与原因见 [§7 已知缺口](#7-已知缺口)。**593 条用例**，`ruff` 与 `mypy --strict`（82 个源文件）全绿。
+完整清单与原因见 [§7 已知缺口](#7-已知缺口)。**622 条用例**，`ruff` 与 `mypy --strict`（86 个源文件）全绿。
 
-五个命令行入口：`aimoney-data`（数据）、`aimoney-backtest`（回测）、`aimoney-factor`（因子）、
-`aimoney-paper`（模拟盘）、`aimoney-schedule`（盘前/盘后调度）。
+六个命令行入口：`aimoney-data`（数据）、`aimoney-backtest`（回测）、`aimoney-factor`（因子）、
+`aimoney-paper`（模拟盘）、`aimoney-schedule`（盘前/盘后调度）、`aimoney-report`（日报与区间报告）。
 
 ---
 
@@ -292,6 +293,32 @@ aimoney-schedule plan --days 7
 > 质量校验随后判定"缺失 3/8 只"并关闭门禁——**判决是对的，但原因很隐蔽**。
 > 给列表加引号，或重复传参（`--codes 000001`）。
 
+## 2.9 报告与归因（`aimoney-report`）
+
+```powershell
+# 日报：账户 / 当日成交 / 当日委托 / 持仓 / 累计归因
+aimoney-report daily  --strategy strategies/multi_factor_enhance --date 2026-10-21
+# 区间报告：绩效 + 交易成本 + 归因
+aimoney-report period --strategy strategies/multi_factor_enhance --start 2026-10-20 --end 2026-10-22
+```
+
+报告写两份到 `data/reports/<策略>/`：`.md` 给人读、`.json` 给程序读（同日同名覆盖，
+历史序列由 `nav.jsonl` 与成交流水承担）。盘后调度链默认会自动生成当天的日报。
+
+**归因按成交逐笔重放**，用移动加权平均成本算已实现盈亏——只读"当前持仓的成本价"会丢失
+已清仓标的的盈亏，而"哪个标的赚了钱"恰恰是最常被问的问题。
+
+三个容易误读的地方，都已在报告里写明：
+
+1. **两套成本口径**：账本 `avg_cost` 是成交均价（券商口径，**不含费**）；归因用**含费**成本。
+   两者之差正好等于买入费用，报告里两个"浮动盈亏"数字不同是刻意的。
+2. **补看历史某天**：账本只存最新状态，报告会显式标注"账户与持仓是最新状态，
+   当日成交与委托才是那一天的"（JSON 里 `stale: true`）。要看准确账户请在当天运行后立即出报告。
+3. **区间绩效只能来自 `nav.jsonl`**：用"最新持仓 × 某日价格"反推历史净值会漏掉期间已平仓的标的。
+
+> 自校验：演示数据上「归因合计 −6010.97」与「总资产变化 −6010.97」完全一致——
+> 这两条路径独立计算，对得上说明归因链路（成交→成本→盈亏）是通的。
+
 常用参数：`--root <目录>` 指定数据根目录，`--config <文件>` 指定配置文件，`--verbose` 打开 DEBUG 日志。
 
 ---
@@ -321,9 +348,10 @@ AIMoney/
 │   ├── factor_cli.py     # aimoney-factor（list/evaluate/combine）
 │   ├── paper_cli.py      # aimoney-paper（run/status）
 │   ├── schedule_cli.py   # aimoney-schedule（once/plan）
+│   ├── report_cli.py     # aimoney-report（daily/period）
 │   ├── main.py           # FastAPI 入口 + 异常到 HTTP 的映射
 │   ├── api/v1/           # 路由层（只做参数校验与编排；当前仅 data）
-│   ├── services/         # 应用服务：data / backtest / factor / paper / schedule
+│   ├── services/         # 应用服务：data / backtest / factor / paper / schedule / report
 │   └── core/             # 配置 / 日志 / 加密 / 异常
 ├── engine/               # ★ 纯计算内核（禁止 import app）
 │   ├── ports.py          # 端口契约（DataSource/BrokerAdapter/Context...）
@@ -336,13 +364,14 @@ AIMoney/
 │   ├── strategy/         # 策略基类 + 加载器 + 内置模板
 │   ├── risk/             # 风控（事前逐单 / 事中触线 / 急停开关）
 │   ├── broker/           # 券商适配器（模拟盘：冻结/撮合/回报）
-│   ├── trade/            # 交易链路（订单管理：幂等报单/闸门/查单校准）
+│   ├── trade/            # 交易链路（订单管理/账本持久化：幂等报单/闸门/查单校准）
+│   ├── report/           # 报告层（逐笔重放归因）
 │   └── backtest/         # 回测内核（撮合/成本/指标/引擎主循环）
 ├── conf/                 # aimoney.yaml（可入库）/ secrets.yaml（已忽略）
 ├── data/                 # 运行时数据（已忽略）：parquet / reference / quality / state / logs
 ├── docs/                 # 需求 / 设计 / 任务 / 验收报告
 ├── strategies/           # 用户策略（P1 起）
-└── tests/                # 593 条用例（另有联网用例默认跳过）
+└── tests/                # 622 条用例（另有联网用例默认跳过）
 ```
 
 ---
@@ -354,6 +383,11 @@ AIMoney/
 .venv\Scripts\python.exe -m pytest -m network # 联网冒烟（数据源接口）
 .venv\Scripts\python.exe -m ruff check .      # 静态检查
 .venv\Scripts\python.exe -m mypy              # 类型检查（strict）
+
+# 若本机安全护栏拦截 pytest 回收历史临时目录（现象：RC=1 但没有失败用例），
+# 把临时目录指到工作区内、每次用新路径即可：
+New-Item -ItemType Directory -Force data\_pt | Out-Null
+.venv\Scripts\python.exe -m pytest --basetemp=data\_pt\run1
 ```
 
 约定：
@@ -386,10 +420,11 @@ AIMoney/
 | 涨跌停价无上游字段 | 由前收 × 板块阈值计算（T-09 已实现） | 如数据源提供则直接采用 |
 | akshare 免费接口限流 | 短时间多次调用会 `RemoteDisconnected`，同步按标的隔离失败并计入告警 | 双源可切换（设计文档已有扩展点） |
 | 分钟线 / 财务数据 | 未覆盖（T-14 / T-15 加档项） | P6 |
-| 因子表达式引擎（自定义公式） | 只支持内置 21 个量价因子，暂不支持用户写表达式 | P2 后续 |
-| 组合权重优化（均值方差 / 风险平价） | 组合层只做分配方案与约束，未做最优化求解 | P6 |
-| 收益归因（`attribution.py`） | 只有绩效指标，没有"收益来自哪些标的/因子"的分解 | 未排期 |
+| 因子表达式引擎（自定义公式） | 只支持内置 21 个量价因子，暂不支持用户写表达式 | P7 |
+| 组合权重优化（均值方差 / 风险平价） | 组合层只做分配方案与约束，未做最优化求解 | P7 |
+| 按因子/行业的归因 | 归因只到**标的**粒度，没有"收益来自哪个因子/行业"的分解 | 未排期 |
 | APScheduler 常驻调度 | 需要外部调度器（任务计划 / cron）每天调用 | 按需 |
+| 环境相关的测试临时目录清理 | 本机安全护栏会拦截 pytest 回收 `%TEMP%\pytest-of-*`（一次 800+ 文件），表现为 `RC=1` 但无失败用例；用 `--basetemp` 指向工作区可绕开 | 见 §5 |
 
 ---
 

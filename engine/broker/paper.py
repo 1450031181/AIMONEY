@@ -23,7 +23,7 @@ import copy
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Final
 
@@ -47,6 +47,8 @@ _logger = logging.getLogger(__name__)
 
 _ZERO: Final[Decimal] = Decimal(0)
 DEFAULT_MAX_DEFER_DAYS: Final[int] = 2
+#: 模拟盘的撮合时点（开盘），用于给成交打时间戳
+_OPEN_TIME: Final[time] = time(9, 30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +136,8 @@ class PaperBrokerAdapter:
         self._orders: list[Order] = []
         self._trades: list[Trade] = []
         self._last_prices: dict[str, Decimal] = {}
+        #: 当前模拟交易日（由 push_bars 的 ``on`` 传入；成交时间戳以它为准）
+        self._trade_date: date | None = None
         self._connected = False
         self._order_callbacks: list[OrderCallback] = []
         self._trade_callbacks: list[TradeCallback] = []
@@ -172,6 +176,10 @@ class PaperBrokerAdapter:
     def query_orders(self) -> list[Order]:
         """全量委托（含已终结）。断线后校准以它为准。"""
         return [copy.deepcopy(order) for order in self._orders]
+
+    def query_trades(self) -> list[Trade]:
+        """全量成交流水（按发生顺序）。归因、对账明细与成本分析都以它为基础。"""
+        return [copy.deepcopy(trade) for trade in self._trades]
 
     # ============================================================ 端口：报单
     def place_order(self, order: Order) -> str:
@@ -212,8 +220,16 @@ class PaperBrokerAdapter:
         return True
 
     # ============================================================ 模拟盘专属：行情推进
-    def push_bars(self, bars: Mapping[str, Bar]) -> list[Trade]:
-        """推进行情：用当日 bar 撮合所有在途委托，返回本次成交。"""
+    def push_bars(self, bars: Mapping[str, Bar], *, on: date | None = None) -> list[Trade]:
+        """推进行情：用当日 bar 撮合所有在途委托，返回本次成交。
+
+        ``on`` 是**模拟交易日**。必须由调用方传入：成交时间若取墙钟，
+        补跑历史某天时所有成交都会堆到"今天"，日报的"当日成交"永远为空，
+        归因的按时间排序也会失真。这和回测引擎里修过的是同一个坑。
+        """
+        if on is not None:
+            self._trade_date = on
+            self._account.trade_date = on
         trades: list[Trade] = []
         for bar in bars.values():
             if bar.close > 0:
@@ -223,8 +239,8 @@ class PaperBrokerAdapter:
             trades.extend(self._match(entry, bars.get(entry.order.code)))
         return trades
 
-    def push_bar(self, bar: Bar) -> list[Trade]:
-        return self.push_bars({bar.code: bar})
+    def push_bar(self, bar: Bar, *, on: date | None = None) -> list[Trade]:
+        return self.push_bars({bar.code: bar}, on=on)
 
     @property
     def last_prices(self) -> dict[str, Decimal]:
@@ -243,6 +259,7 @@ class PaperBrokerAdapter:
         last_prices: Mapping[str, Decimal] | None = None,
         orders: Mapping[str, Order] | None = None,
         open_orders: Sequence[OpenOrderRecord] = (),
+        trades: Sequence[Trade] = (),
     ) -> None:
         """从持久化快照恢复账户、持仓**与在途委托**（模拟盘跨日运行的必需能力）。
 
@@ -265,6 +282,8 @@ class PaperBrokerAdapter:
         # 委托簿必须一起恢复：否则重启后 query_orders() 返回空，
         # 查单校准会把所有在途委托误判成"券商查无此单（废单）"并永久标记为 REJECTED。
         self._orders = list(by_id.values())
+        # 成交流水同理：不恢复的话每次重启都从零开始，归因与对账会丢掉全部历史
+        self._trades = list(trades)
         self._open = {}
         for record in open_orders:
             order = by_id.get(record.order_id)
@@ -282,10 +301,13 @@ class PaperBrokerAdapter:
                 self._idem_index[order.idem_key] = order.broker_order_id
 
     def roll_to_next_day(self) -> None:
-        """日切：T+1 解冻（昨日买入转为可卖）。"""
+        """日切：T+1 解冻（昨日买入转为可卖）。
+
+        只做持仓解冻——**不用墙钟改写交易日**：交易日期由调用方按模拟日推进，
+        在这里塞 `date.today()` 会让补跑历史时账本上的日期跳到今天。
+        """
         for position in self._positions.values():
             position.roll_to_next_day()
-        self._account.trade_date = date.today() if self._account.trade_date is None else self._account.trade_date
 
     # ============================================================ 内部：冻结与释放
     def _require_connected(self) -> None:
@@ -345,7 +367,7 @@ class PaperBrokerAdapter:
         plan = OrderPlan(
             code=order.code,
             strategy_id=order.strategy_id,
-            trade_date=self._account.trade_date or date.today(),
+            trade_date=self._trade_date or self._account.trade_date or date.today(),
             side=order.side,
             target_qty=order.remaining_qty,
             limit_price=order.price,
@@ -440,7 +462,8 @@ class PaperBrokerAdapter:
             commission=fees.commission,
             stamp_tax=fees.stamp_tax,
             transfer_fee=fees.transfer_fee,
-            trade_time=datetime.now(),
+            # 成交时间取**模拟交易日**开盘，而不是墙钟
+            trade_time=datetime.combine(self._trade_date or date.today(), _OPEN_TIME),
         )
         self._trades.append(trade)
         return trade
